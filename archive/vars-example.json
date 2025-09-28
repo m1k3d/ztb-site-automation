@@ -1,0 +1,11 @@
+{
+  "site_name": "ACME-CHI-001",
+  "gateway_name": "acme-chi-gw-01",
+  "city": "Chicago",
+  "country": "US",
+  "wan0_ip": "203.0.113.10",
+  "wan0_mask": "255.255.255.252",
+  "wan0_gw": "203.0.113.9",
+  "vlan_id": 20,
+  "lan_subnet": "10.20.0.0/24"
+}

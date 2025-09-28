@@ -1,0 +1,29 @@
+{
+  "site_name": "{{ site_name }}",
+  "dhcp_server_ip": "{{ dhcp_server_ip }}",
+
+  "location": {% if zia_location_id|default('') %}
+    { "location_id": {{ zia_location_id|int }}, "is_existing_location": true }
+  {% else %}
+    {
+      "is_existing_location": false,
+      "details": {
+        "country": "{{ country_code|default('THE_NETHERLANDS') }}",
+        "name": "{{ zia_location_name|default(site_name) }}"
+      }
+    }
+  {% endif %},
+
+  "gateways": [
+    {
+      "gateway_name": "{{ gateway_name }}",
+      "is_wan_dhcp": {{ (is_wan_dhcp|default('false'))|lower }},
+      "default_gw_ip": "{{ wan0_gw }}",
+      "wan_ip_address": "{{ wan0_ip }}",
+      "wan_subnet_mask": "{{ wan0_mask }}",
+      "wan_interface": "{{ wan_interface_name }}"
+    }
+  ],
+
+  "private_dns": "{{ per_site_dns }}"
+}

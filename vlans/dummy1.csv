@@ -1,0 +1,7 @@
+name,tag,subnet,start_ip,dhcp_start,dhcp_end,interface,enabled,zone
+ENERGY,67,24,172.17.67.1,172.17.67.1,172.17.67.254,ge2,TRUE,LAN Zone
+FACTORY,68,24,172.17.68.1,172.17.68.2,172.17.68.254,ge2,TRUE,LAN Zone
+Guest,169,24,172.17.169.1,172.17.169.1,172.17.169.254,ge2,TRUE,LAN Zone
+mgmt,1,24,172.17.199.1,172.17.199.1,172.17.199.254,ge1,TRUE,Management Zone
+mgmt-switch,999,24,172.17.69.1,172.17.69.1,172.17.69.254,ge2,TRUE,LAN Zone
+OT,66,24,172.17.66.1,172.17.66.2,172.17.66.254,ge2,TRUE,LAN Zone
