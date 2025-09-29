@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# bulk_create.py — create sites (v3) then add VLANs (v2) using vlans_file (via gateway_id + cluster_id)
+# bulk_create.py — Deploys sites + VLANs to ZIA/ZTB from sites.csv and VLAN CSVs
+#
+# Author: Mike Dechow (@m1k3d)
+# Repo: github.com/m1k3d/ztb-site-automation
+# License: MIT
+#
+# Usage:
+#   python3 bulk_create.py --dry-run    # Validate payloads without pushing
+#   python3 bulk_create.py              # Create sites and VLANs
+#
+# Notes:
+#   - Reads site definitions from sites.csv
+#   - Attaches VLAN definitions from vlans/<site>.csv (supports CSV or JSON)
+#   - Waits for gateway/cluster readiness before pushing VLANs
+#   - After VLANs are created, sets `status=provisioned` (enables) and patches `share_over_vpn` when requested
 
 import os, sys, csv, json, pathlib, argparse, time, ipaddress
 from typing import Any, Dict, List, Tuple, Optional
@@ -61,8 +75,16 @@ def post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str
     data = json.dumps(payload)
     return session.post(url, data=data, headers=headers, timeout=90)
 
+def put_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
+    data = json.dumps(payload)
+    return session.put(url, data=data, headers=headers, timeout=90)
+
+def patch_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
+    data = json.dumps(payload)
+    return session.patch(url, data=data, headers=headers, timeout=90)
+
 # -------- VLAN loading (CSV or JSON) --------
-def _clean_bool(v: str) -> bool:
+def _clean_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1","true","yes","y")
 
 def _split_dhcp(start: str, end: str) -> Optional[str]:
@@ -80,7 +102,8 @@ def _vlan_from_csv_row(r: Dict[str, str]) -> Dict[str, Any]:
         "tag": str(r.get("tag") or "").strip(),
         "start_ip": (r.get("start_ip") or "").strip(),        # VLAN GW IP
         "zone": (r.get("zone") or "").strip() or "LAN Zone",
-        "enforcement_on": _clean_bool(r.get("enabled","true")),
+        "enabled": _clean_bool(r.get("enabled","true")),      # CSV expresses intent; we PATCH later
+        "share_over_vpn": _clean_bool(r.get("share_over_vpn","false")),
     }
     dr = _split_dhcp(r.get("dhcp_start"), r.get("dhcp_end"))
     if dr:
@@ -112,7 +135,8 @@ def load_vlans(vlans_file: str) -> List[Dict[str, Any]]:
             "tag": str(v.get("tag") or "").strip(),
             "start_ip": (v.get("start_ip") or (v.get("default_gateway") or "")).strip(),
             "zone": (v.get("zone") or "").strip() or "LAN Zone",
-            "enforcement_on": bool(v.get("enforcement_on", True)),
+            "enabled": True,  # JSON usually reflects provisioned state; we enable later anyway
+            "share_over_vpn": bool(v.get("share_over_vpn", False)),
             **({"dhcp_range": v["dhcp_range"]} if v.get("dhcp_range") else {})
         })
     return out
@@ -136,10 +160,7 @@ def get_gateway_detail_v3(gateway_id: str) -> Dict[str, Any]:
     return get_json(url)
 
 def resolve_gateway_and_cluster(site_name: str, retries: int = 40, delay: float = 3.0) -> Tuple[Optional[str], Optional[int]]:
-    """
-    Poll until both gateway_id and cluster_id are available after site creation.
-    ~2 minutes total (40 * 3s).
-    """
+    """Poll until both gateway_id and cluster_id are available after site creation."""
     for _ in range(retries):
         row = find_site_row_by_name(site_name)
         gw_id = None
@@ -234,6 +255,31 @@ def post_vlan(vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
         return True, r.text
     return False, f"{r.status_code} {r.text[:300]}"
 
+# --- helpers: fetch VLANs for site and build a map so we can PATCH/PUT by id ---
+def list_site_vlans_v2(site_id: str) -> List[Dict[str, Any]]:
+    url = f"{API_V2}/Network/"
+    params = {"siteId": site_id, "refresh_token": "enabled"}
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+    }
+    data = get_json(url, params=params, headers=headers)
+    if isinstance(data, dict):
+        rows = data.get("rows") or data.get("result", {}).get("rows")
+        return rows or []
+    if isinstance(data, list):
+        return data
+    return []
+
+def _vlan_key(v: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    """Key by (name/display_name lower, tag, interface lower, start_ip)."""
+    nm = (v.get("display_name") or v.get("name") or "").strip().lower()
+    tg = str(v.get("tag") or "").strip()
+    iface = (v.get("interface") or "").strip().lower()
+    sip = (v.get("start_ip") or v.get("default_gateway") or "").strip()
+    return (nm, tg, iface, sip)
+
 # -------- main --------
 def main():
     ap = argparse.ArgumentParser(description="Bulk create sites then add VLANs from vlans_file (via gateway_id + cluster_id)")
@@ -313,7 +359,76 @@ def main():
                 vlan_fail += 1
                 print(f"    VLAN ERR: {m}")
 
-        print(f"OK  : {site_name}: VLANs posted OK={vlan_ok} ERR={vlan_fail}")
+        print(f"OK  : {site_name}: VLANs POSTed OK={vlan_ok} ERR={vlan_fail}")
+
+        # 4) Enable + share_over_vpn (requires VLAN ids) — fetch site VLANs and patch
+        #    Build a map so we can match each CSV VLAN to its created record.
+        site_row = find_site_row_by_name(site_name) or {}
+        ci = site_row.get("cluster_info") or {}
+        site_id = ci.get("site_id") or site_row.get("site_id") or site_row.get("id")
+        if not site_id:
+            print(f"ERR : {site_name}: cannot resolve site_id for post-patch actions")
+            fail += 1; continue
+
+        current = list_site_vlans_v2(str(site_id))
+        id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {_vlan_key(v): v for v in current}
+
+        # Helper to safely lookup an id
+        def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
+            k = _vlan_key(csv_vlan)
+            hit = id_map.get(k)
+            if hit and hit.get("id"):
+                return hit["id"]
+            # Relaxed fallback: try by (name, tag) only
+            nm = (csv_vlan.get("display_name") or csv_vlan.get("name") or "").strip().lower()
+            tg = str(csv_vlan.get("tag") or "").strip()
+            for v in current:
+                if (v.get("display_name") or v.get("name") or "").strip().lower() == nm and str(v.get("tag") or "") == tg:
+                    if v.get("id"):
+                        return v["id"]
+            return None
+
+        # headers shared by v2 mutating calls
+        v2_hdrs = {
+            "Accept": "application/json, text/plain, */*",
+            "Origin": ORIGIN,
+            "Referer": REFERER,
+            "Content-Type": "application/json",
+        }
+
+        # a) Enable (status=provisioned) where CSV says enabled=True
+        for v in vlans:
+            if not v.get("enabled", True):
+                continue
+            vid = find_id_for(v)
+            if not vid:
+                print(f"    WARN enable: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                continue
+            url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
+            payload = {
+                "name": v.get("display_name") or v.get("name") or "",
+                "subnet": str(v.get("subnet") or ""),
+                "per_network_dns": "",
+                "status": "provisioned",
+            }
+            r = put_json(url, payload, headers=v2_hdrs)
+            if r.status_code not in (200,204):
+                print(f"    WARN enable PUT {vid}: {r.status_code} {r.text[:180]}")
+
+        # b) Patch share_over_vpn where requested TRUE
+        for v in vlans:
+            if not v.get("share_over_vpn", False):
+                continue
+            vid = find_id_for(v)
+            if not vid:
+                print(f"    WARN share_over_vpn: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                continue
+            url = f"{API_V2}/Network/share-over-vpn?refresh_token=enabled"
+            payload = {"id": vid, "share_over_vpn": True}
+            r = patch_json(url, payload, headers=v2_hdrs)
+            if r.status_code not in (200,204):
+                print(f"    WARN share_over_vpn PATCH {vid}: {r.status_code} {r.text[:180]}")
+
         ok += 1
 
     print(f"\nDone. OK={ok}  ERR={fail}")

@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
 # pull_site.py — list sites OR pull one site by name, save VLAN JSON+CSV, and upsert sites.csv
+# Author: Mike Dechow (@m1k3d)
+# Repo: github.com/m1k3d/ztb-site-automation
+# License: MIT
+#
+# Usage:
+#   python3 pull_site.py                   # lists sites
+#   python3 pull_site.py --site-name "Utrecht-Branch"
+#   python3 pull_site.py --site-name "Utrecht-Branch" --include-wan
+#   python3 pull_site.py --site-name "Utrecht-Branch" --json-only
+#
+# Notes:
+#   - Saves VLAN definitions to vlans/<site>.json and vlans/<site>.csv
+#   - CSV now includes a "share_over_vpn" column (TRUE/FALSE)
+#   - By default, WAN VLANs are excluded from the CSV (use --include-wan to keep them)
+#   - Updates or inserts site row into sites.csv for bulk_create.py
 
 import os, sys, json, csv, argparse, pathlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -76,7 +91,7 @@ def get_json_v3(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
 
 def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
     """
-    Your tenant exposes VLANs via /api/v2/Network/?siteId=...
+    Tenant exposes VLANs via /api/v2/Network/?siteId=...
     We mirror the browser Origin/Referer.
     Returns a list of vlan dicts.
     """
@@ -141,7 +156,7 @@ def match_row_by_name(rows: List[Dict[str, Any]], site_name: str) -> Optional[Di
 # ------------------------
 VLAN_CSV_FIELDS = [
     "name", "tag", "subnet", "start_ip", "dhcp_start", "dhcp_end",
-    "interface", "zone", "enabled"
+    "interface", "zone", "enabled", "share_over_vpn"
 ]
 
 def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
@@ -171,6 +186,8 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             start_ip = a
         dhcp_start, dhcp_end = _split_range(v)
         enabled = "TRUE" if bool(v.get("enforcement_on", True)) else "FALSE"
+        share_over_vpn = "TRUE" if bool(v.get("share_over_vpn", False)) else "FALSE"
+
         out.append({
             "name": name,
             "tag": tag,
@@ -181,6 +198,7 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "interface": iface,
             "zone": zone,
             "enabled": enabled,
+            "share_over_vpn": share_over_vpn,
         })
     return out
 
@@ -227,6 +245,19 @@ def upsert_sites_csv_row(row: Dict[str, str]):
         writer.writerows(out)
 
 # ------------------------
+# helpers
+# ------------------------
+def is_wan_vlan(v: Dict[str, Any]) -> bool:
+    """Heuristic to identify WAN VLANs: prefer zone label; fall back to name hint."""
+    zone = (v.get("zone") or "").strip().lower()
+    if zone.startswith("wan"):
+        return True
+    name = (v.get("display_name") or v.get("name") or "").strip().lower()
+    if name.startswith("wan"):
+        return True
+    return False
+
+# ------------------------
 # Main
 # ------------------------
 def main():
@@ -235,6 +266,7 @@ def main():
     )
     ap.add_argument("--site-name", help="Human site name from the UI (e.g. 'Utrecht-Branch')")
     ap.add_argument("--json-only", action="store_true", help="Skip writing VLAN CSV")
+    ap.add_argument("--include-wan", action="store_true", help="Include WAN VLANs in the CSV (default: excluded)")
     args = ap.parse_args()
 
     rows = list_gateways_rows()
@@ -257,10 +289,14 @@ def main():
         sys.exit(1)
 
     # VLANs
-    vlans = get_vlans_v2_network(str(site_id))
+    vlans_all = get_vlans_v2_network(str(site_id))
     vlan_json_path = OUT_VLANS_DIR / f"{args.site_name}.json"
-    vlan_json_path.write_text(json.dumps(vlans, indent=2) + "\n", encoding="utf-8")
-    print(f"Saved VLANs JSON: {vlan_json_path} (count={len(vlans)})")
+    vlan_json_path.write_text(json.dumps(vlans_all, indent=2) + "\n", encoding="utf-8")
+    print(f"Saved VLANs JSON: {vlan_json_path} (count={len(vlans_all)})")
+
+    vlans = vlans_all if args.include_wan else [v for v in vlans_all if not is_wan_vlan(v)]
+    if not args.include_wan:
+        print(f"Filtered out WAN VLANs. CSV count={len(vlans)}")
 
     if not args.json_only:
         vlan_csv_path = OUT_VLANS_DIR / f"{args.site_name}.csv"
