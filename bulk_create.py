@@ -4,7 +4,7 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-#
+# Version: 1.0.0
 # Usage:
 #   python3 bulk_create.py --dry-run    # Validate payloads without pushing
 #   python3 bulk_create.py              # Create sites and VLANs

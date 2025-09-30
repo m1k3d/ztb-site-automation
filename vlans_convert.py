@@ -4,7 +4,7 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-#
+#version: 1.0.0
 # Usage (either form works):
 #   # Use a site name (reads vlans/<site>.json, writes vlans/<site>.csv)
 #   python3 vlans_convert.py --site-name "Utrecht-Branch"
