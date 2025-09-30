@@ -12,7 +12,7 @@ Automation scripts for creating and managing **Zscaler ZTB sites** via API
 - **site_template.json.j2** — Jinja2 template for site payloads.
 - **vlans/\*.csv** — VLAN definition files per site (exported by `pull_site.py` or `vlans_convert.py`).
 - **vlans/\*.json** — raw VLAN JSON output (also from `pull_site.py`).
-- **vlans_convert.py** — helper to convert VLAN JSON ↔ CSV.
+- **vlans_convert.py** — helper to convert VLAN JSON ↔ CSV (now includes `dhcp_service`).
 - **.env** — holds environment variables (`ZIA_API_BASE`, `BEARER`).
 
 ---
@@ -44,7 +44,6 @@ Pull site info, save VLANs, and update sites.csv.
 
 python3 pull_site.py
 
-
 	•	Pull a specific site:
 
 python3 pull_site.py --site-name "Utrecht-Branch"
@@ -53,17 +52,13 @@ Writes:
 	•	VLANs JSON → vlans/Utrecht-Branch.json
 	•	VLANs CSV → vlans/Utrecht-Branch.csv
 	•	Upserts row in sites.csv
-
 	•	JSON only (skip CSV):
 
 python3 pull_site.py --site-name "Utrecht-Branch" --json-only
 
-
 	•	Include WAN VLAN in CSV (default is to exclude it):
 
 python3 pull_site.py --site-name "Utrecht-Branch" --include-wan
-
-
 
 CLI reference
 
@@ -75,7 +70,7 @@ options:
   --include-wan      Include the WAN VLAN in the generated CSV (default: off).
 
 Notes
-	•	WAN detection uses API fields (e.g., zone == "WAN Zone"). Use --include-wan if you want that row in your CSV.
+	•	WAN detection uses API fields (e.g., zone == “WAN Zone”). Use --include-wan if you want that row in your CSV.
 
 ⸻
 
@@ -87,12 +82,9 @@ Also flips per-VLAN flags from the CSV.
 
 python3 bulk_create.py --dry-run
 
-
 	•	Create + push VLANs:
 
 python3 bulk_create.py
-
-
 
 How it works
 	1.	Reads sites.csv, selecting rows where post=1.
@@ -100,12 +92,10 @@ How it works
 	3.	Polls until both gateway_id and cluster_id are ready.
 	4.	Loads VLANs from the vlans_file path in the row and POSTs each VLAN (v2).
 	5.	Per VLAN:
-	•	enabled=TRUE  → send "status":"provisioned"
-	•	enabled=FALSE → send "status":"notprovisioned"
+	•	enabled=TRUE → send "status":"provisioned"
+	•	enabled=FALSE → leave disabled
 	•	share_over_vpn=TRUE/FALSE → PATCH the share_over_vpn flag
-
-If dhcp_start and dhcp_end are blank, VLANs are created with DHCP disabled (relay use-cases).
-Provide a range only for local DHCP scenarios.
+	•	dhcp_service (see schema below) → passed through to API
 
 CLI reference
 
@@ -133,10 +123,19 @@ lan_interface_name,wan_interface_name,vlans_file,post
 
 🔄 VLAN CSV schema (consumed by bulk_create.py)
 
-tag,name,display_name,subnet,gateway,dhcp_start,dhcp_end,interface,enabled,share_over_vpn
+tag,name,display_name,subnet,default_gateway,dhcp_start,dhcp_end,dhcp_service,interface,zone,enabled,share_over_vpn
 
 	•	enabled → maps to UI “Disable/Enable” (via "status")
 	•	share_over_vpn → controls the Share-over-VPN toggle (API v2 PATCH)
+	•	default_gateway → replaces start_ip field
+	•	dhcp_service options:
+	•	on → inherit (DHCP enabled)
+	•	inherit → use template setting
+	•	non_airgapped → DHCP on (non-airgapped)
+	•	no_dhcp → DHCP disabled
+If left blank:
+	•	If dhcp_start/dhcp_end present → defaults to inherit
+	•	If no range → defaults to no_dhcp
 
 ⸻
 
@@ -147,17 +146,13 @@ Convert a pulled VLAN JSON to a clean CSV (or vice-versa in your workflow).
 
 python3 vlans_convert.py --site-name "Utrecht-Branch"
 
-
 	•	From a specific JSON file:
 
 python3 vlans_convert.py --from-json vlans/Utrecht-Branch.json --to-csv vlans/Utrecht-Branch.csv
 
-
 	•	Include the raw vlan_id column:
 
 python3 vlans_convert.py --site-name "Utrecht-Branch" --include-id
-
-
 
 CLI reference
 
@@ -171,7 +166,7 @@ options:
 
 CSV columns emitted (default):
 
-tag,name,display_name,subnet,gateway,dhcp_start,dhcp_end,interface,enabled,share_over_vpn
+tag,name,display_name,subnet,default_gateway,dhcp_start,dhcp_end,dhcp_service,interface,zone,enabled,share_over_vpn
 
 
 ⸻
@@ -181,13 +176,11 @@ tag,name,display_name,subnet,gateway,dhcp_start,dhcp_end,interface,enabled,share
 
 python3 pull_site.py
 
-
 	2.	Pull an existing site (default excludes WAN VLAN):
 
 python3 pull_site.py --site-name "Utrecht-Branch"
 
 (use --include-wan to keep the WAN VLAN in CSV)
-
 	3.	Edit sites.csv:
 	•	Fill WAN IP/mask/gw, DNS, etc.
 	•	Set post=1 for new/changed sites.
@@ -195,17 +188,15 @@ python3 pull_site.py --site-name "Utrecht-Branch"
 
 python3 bulk_create.py --dry-run
 
-
 	5.	Deploy site + VLANs:
 
 python3 bulk_create.py
-
 
 	6.	Verify VLANs (v2):
 
 curl -s -H "Authorization: Bearer $BEARER" \
   "$ZIA_API_BASE/../api/v2/Network/?siteId=<site_id>&refresh_token=enabled" \
-| jq -r '.result.rows[] | [.display_name,.interface,.tag,.default_gateway,.status,.share_over_vpn] | @tsv'
+| jq -r '.result.rows[] | [.display_name,.interface,.tag,.default_gateway,.status,.share_over_vpn,.dhcp_service] | @tsv'
 
 Replace <site_id> with the id from the Sites list.
 
@@ -216,6 +207,7 @@ Replace <site_id> with the id from the Sites list.
 	•	⏱️ Propagation → gateway/cluster readiness can take ~30–60s; bulk_create.py polls.
 	•	🌐 WAN VLAN → typically auto-created; keep or exclude it from CSV to your preference.
 	•	🗃️ History → JSON/CSV under vlans/ provide a change record across pulls/deploys.
+	•	⚡ New: dhcp_service support and default_gateway field in CSV align closer with API behavior.
 
 ⸻
 
@@ -223,3 +215,5 @@ Replace <site_id> with the id from the Sites list.
 	•	Author: Mike Dechow (@m1k3d)
 	•	Repo: github.com/m1k3d/ztb-site-automation
 	•	License: MIT
+
+---
