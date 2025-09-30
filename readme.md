@@ -132,8 +132,7 @@ tag,name,display_name,subnet,default_gateway,dhcp_start,dhcp_end,dhcp_service,in
 	•	on → inherit (DHCP enabled)
 	•	inherit → use template setting
 	•	non_airgapped → DHCP on (non-airgapped)
-	•	no_dhcp → DHCP disabled
-If left blank:
+	•	no_dhcp → DHCP disabled If left blank:
 	•	If dhcp_start/dhcp_end present → defaults to inherit
 	•	If no range → defaults to no_dhcp
 
