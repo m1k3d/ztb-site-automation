@@ -129,8 +129,7 @@ tag,name,display_name,subnet,default_gateway,dhcp_start,dhcp_end,dhcp_service,in
 	•	share_over_vpn → controls the Share-over-VPN toggle (API v2 PATCH)
 	•	default_gateway → replaces start_ip field
 	•	dhcp_service options:
-	•	on → inherit (DHCP enabled)
-	•	inherit → use template setting
+	•	on → inherit (DHCP enabled) (airgapped)
 	•	non_airgapped → DHCP on (non-airgapped)
 	•	no_dhcp → DHCP disabled If left blank:
 	•	If dhcp_start/dhcp_end present → defaults to inherit
