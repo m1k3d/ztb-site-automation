@@ -11,14 +11,38 @@
 #
 # Notes:
 #   - Reads site definitions from sites.csv
-#   - Attaches VLAN definitions from vlans/<site>.csv (supports CSV or JSON)
+#   - Attaches VLAN definitions from vlans/<site>.csv (CSV or JSON)
+#   - CSV columns expected for VLANs:
+#       name, tag, subnet, default_gateway, dhcp_start, dhcp_end,
+#       dhcp_service, interface, zone, enabled, share_over_vpn
+#     · dhcp_service accepts: on, inherit, non-airgapped, no_dhcp
+#       (we send API values: inherit | non_airgapped | no_dhcp)
 #   - Waits for gateway/cluster readiness before pushing VLANs
-#   - After VLANs are created, sets `status=provisioned` (enables) and patches `share_over_vpn` when requested
+#   - After creation: PUT status=provisioned (enable), PATCH share_over_vpn
 
-import os, sys, csv, json, pathlib, argparse, time, ipaddress
+import os, sys, csv, json, time, ipaddress, argparse, pathlib
 from typing import Any, Dict, List, Tuple, Optional
 import requests
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+# ------------------------
+# tiny .env loader (keeps your flow portable)
+# ------------------------
+def load_env_file(path: str = ".env"):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+load_env_file(".env")
 
 # -------- env / session --------
 def get_sessions_and_bases() -> Tuple[requests.Session, str, str, str, str]:
@@ -37,6 +61,7 @@ def get_sessions_and_bases() -> Tuple[requests.Session, str, str, str, str]:
         "Authorization": f"Bearer {bearer}",
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "bulk_create.py",
     })
 
     base_v2 = base_v3.replace("/api/v3", "/api/v2")
@@ -83,7 +108,7 @@ def patch_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, st
     data = json.dumps(payload)
     return session.patch(url, data=data, headers=headers, timeout=90)
 
-# -------- VLAN loading (CSV or JSON) --------
+# -------- value normalization --------
 def _clean_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1","true","yes","y")
 
@@ -93,21 +118,40 @@ def _split_dhcp(start: str, end: str) -> Optional[str]:
     if s and e: return f"{s}-{e}"
     return None
 
+def norm_dhcp_service(val: str, has_range: bool) -> str:
+    """
+    Accept human inputs from CSV and map to API values:
+      on -> inherit
+      inherit -> inherit
+      non-airgapped / non_airgapped -> non_airgapped
+      no_dhcp / off -> no_dhcp
+    If blank: default to 'inherit' when we have a range, else 'no_dhcp'.
+    """
+    v = (val or "").strip().lower().replace("-", "_")
+    if v == "on": return "inherit"
+    if v in ("inherit", "non_airgapped", "no_dhcp"): return v
+    if v == "off": return "no_dhcp"
+    return "inherit" if has_range else "no_dhcp"
+
+# -------- VLAN loading (CSV or JSON) --------
 def _vlan_from_csv_row(r: Dict[str, str]) -> Dict[str, Any]:
+    dhcp_range = _split_dhcp(r.get("dhcp_start"), r.get("dhcp_end"))
+    svc = norm_dhcp_service(r.get("dhcp_service", ""), bool(dhcp_range))
     vlan = {
         "name": (r.get("name") or "").strip(),
         "display_name": (r.get("name") or "").strip(),
-        "interface": (r.get("interface") or "").strip(),      # ge2 / ge1 / ge5
-        "subnet": str(r.get("subnet") or "").strip(),         # "24"
+        "interface": (r.get("interface") or "").strip(),
+        "subnet": str(r.get("subnet") or "").strip(),
         "tag": str(r.get("tag") or "").strip(),
-        "start_ip": (r.get("start_ip") or "").strip(),        # VLAN GW IP
+        # CSV uses default_gateway (we also mirror to start_ip for safety)
+        "default_gateway": (r.get("default_gateway") or "").strip(),
+        "start_ip": (r.get("default_gateway") or "").strip(),
         "zone": (r.get("zone") or "").strip() or "LAN Zone",
-        "enabled": _clean_bool(r.get("enabled","true")),      # CSV expresses intent; we PATCH later
+        "enabled": _clean_bool(r.get("enabled","true")),
         "share_over_vpn": _clean_bool(r.get("share_over_vpn","false")),
+        "dhcp_service": svc,
+        **({"dhcp_range": dhcp_range} if dhcp_range else {})
     }
-    dr = _split_dhcp(r.get("dhcp_start"), r.get("dhcp_end"))
-    if dr:
-        vlan["dhcp_range"] = dr
     return vlan
 
 def load_vlans(vlans_file: str) -> List[Dict[str, Any]]:
@@ -119,7 +163,7 @@ def load_vlans(vlans_file: str) -> List[Dict[str, Any]]:
         rows = read_csv_rows(p)
         return [_vlan_from_csv_row(r) for r in rows]
 
-    # JSON fallback
+    # JSON fallback (kept for convenience)
     with open(p, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict):
@@ -127,17 +171,21 @@ def load_vlans(vlans_file: str) -> List[Dict[str, Any]]:
     if not isinstance(data, list): data = []
     out = []
     for v in data:
+        # Try to reconstruct a CSV-like vlan
+        dhcp_range = v.get("dhcp_range")
         out.append({
             "name": (v.get("display_name") or v.get("name") or "").strip(),
             "display_name": (v.get("display_name") or v.get("name") or "").strip(),
             "interface": (v.get("interface") or "").strip(),
             "subnet": str(v.get("subnet") or "").strip(),
             "tag": str(v.get("tag") or "").strip(),
-            "start_ip": (v.get("start_ip") or (v.get("default_gateway") or "")).strip(),
+            "default_gateway": (v.get("start_ip") or v.get("default_gateway") or "").strip(),
+            "start_ip": (v.get("start_ip") or v.get("default_gateway") or "").strip(),
             "zone": (v.get("zone") or "").strip() or "LAN Zone",
-            "enabled": True,  # JSON usually reflects provisioned state; we enable later anyway
+            "enabled": True,
             "share_over_vpn": bool(v.get("share_over_vpn", False)),
-            **({"dhcp_range": v["dhcp_range"]} if v.get("dhcp_range") else {})
+            "dhcp_service": norm_dhcp_service(v.get("dhcp_service",""), bool(dhcp_range)),
+            **({"dhcp_range": dhcp_range} if dhcp_range else {})
         })
     return out
 
@@ -213,7 +261,7 @@ def _short_name(name: str, maxlen: int = 16) -> str:
     return n[:maxlen]
 
 def vlan_to_v2_payload(vlan: Dict[str, Any], gateway_id: str, cluster_id: int) -> Dict[str, Any]:
-    start_ip = vlan.get("start_ip") or ""
+    start_ip = vlan.get("start_ip") or vlan.get("default_gateway") or ""
     subnet   = str(vlan.get("subnet") or "").strip()
     ip_range = _network_base_from_start(start_ip, subnet) or vlan.get("ip_range") or ""
 
@@ -237,12 +285,13 @@ def vlan_to_v2_payload(vlan: Dict[str, Any], gateway_id: str, cluster_id: int) -
         "name": safe_name,
         "cluster_id": int(cluster_id),
         "event_type": "addnetwork",
-        "dhcp_service": "inherit" if vlan.get("dhcp_range") else "no_dhcp",
+        "dhcp_service": norm_dhcp_service(vlan.get("dhcp_service",""), bool(vlan.get("dhcp_range"))),
+        "share_over_vpn": bool(vlan.get("share_over_vpn", False)),
     }
     return payload
 
 def post_vlan(vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
-    # NOTE trailing slash is important on many tenants
+    # NOTE trailing slash is required on many tenants
     url = f"{API_V2}/Network/?refresh_token=enabled"
     headers = {
         "Accept": "application/json, text/plain, */*",
@@ -273,12 +322,12 @@ def list_site_vlans_v2(site_id: str) -> List[Dict[str, Any]]:
     return []
 
 def _vlan_key(v: Dict[str, Any]) -> Tuple[str, str, str, str]:
-    """Key by (name/display_name lower, tag, interface lower, start_ip)."""
+    """Key by (name/display_name lower, tag, interface lower, default_gateway/start_ip)."""
     nm = (v.get("display_name") or v.get("name") or "").strip().lower()
     tg = str(v.get("tag") or "").strip()
     iface = (v.get("interface") or "").strip().lower()
-    sip = (v.get("start_ip") or v.get("default_gateway") or "").strip()
-    return (nm, tg, iface, sip)
+    gw = (v.get("default_gateway") or v.get("start_ip") or "").strip()
+    return (nm, tg, iface, gw)
 
 # -------- main --------
 def main():
@@ -361,8 +410,8 @@ def main():
 
         print(f"OK  : {site_name}: VLANs POSTed OK={vlan_ok} ERR={vlan_fail}")
 
-        # 4) Enable + share_over_vpn (requires VLAN ids) — fetch site VLANs and patch
-        #    Build a map so we can match each CSV VLAN to its created record.
+        # 4) Enable + share_over_vpn + (re)apply dhcp_service — requires VLAN ids
+        #    Resolve site_id to list vlans
         site_row = find_site_row_by_name(site_name) or {}
         ci = site_row.get("cluster_info") or {}
         site_id = ci.get("site_id") or site_row.get("site_id") or site_row.get("id")
@@ -373,13 +422,12 @@ def main():
         current = list_site_vlans_v2(str(site_id))
         id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {_vlan_key(v): v for v in current}
 
-        # Helper to safely lookup an id
         def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
             k = _vlan_key(csv_vlan)
             hit = id_map.get(k)
             if hit and hit.get("id"):
                 return hit["id"]
-            # Relaxed fallback: try by (name, tag) only
+            # Relaxed fallback: try by (name, tag)
             nm = (csv_vlan.get("display_name") or csv_vlan.get("name") or "").strip().lower()
             tg = str(csv_vlan.get("tag") or "").strip()
             for v in current:
@@ -388,7 +436,6 @@ def main():
                         return v["id"]
             return None
 
-        # headers shared by v2 mutating calls
         v2_hdrs = {
             "Accept": "application/json, text/plain, */*",
             "Origin": ORIGIN,
@@ -428,6 +475,27 @@ def main():
             r = patch_json(url, payload, headers=v2_hdrs)
             if r.status_code not in (200,204):
                 print(f"    WARN share_over_vpn PATCH {vid}: {r.status_code} {r.text[:180]}")
+
+        # c) (Re)apply dhcp_service if CSV specified something explicit
+        for v in vlans:
+            desired = norm_dhcp_service(v.get("dhcp_service",""), bool(v.get("dhcp_range")))
+            # If CSV was blank, we already chose a default during POST; skip.
+            if (v.get("dhcp_service") or "") == "":
+                continue
+            vid = find_id_for(v)
+            if not vid:
+                print(f"    WARN dhcp_service: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                continue
+            url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
+            payload = {
+                "name": v.get("display_name") or v.get("name") or "",
+                "subnet": str(v.get("subnet") or ""),
+                "per_network_dns": "",
+                "dhcp_service": desired,
+            }
+            r = put_json(url, payload, headers=v2_hdrs)
+            if r.status_code not in (200,204):
+                print(f"    WARN dhcp_service PUT {vid}: {r.status_code} {r.text[:180]}")
 
         ok += 1
 

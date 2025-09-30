@@ -12,8 +12,9 @@
 #
 # Notes:
 #   - Saves VLAN definitions to vlans/<site>.json and vlans/<site>.csv
-#   - CSV now includes a "share_over_vpn" column (TRUE/FALSE)
-#   - By default, WAN VLANs are excluded from the CSV (use --include-wan to keep them)
+#   - CSV includes "share_over_vpn" (TRUE/FALSE) and "dhcp_service" (on/off/non-airgapped)
+#   - CSV "enabled" = TRUE iff status == "provisioned"
+#   - By default, WAN VLANs are excluded from the CSV (use --include-wan to include them)
 #   - Updates or inserts site row into sites.csv for bulk_create.py
 
 import os, sys, json, csv, argparse, pathlib
@@ -155,8 +156,8 @@ def match_row_by_name(rows: List[Dict[str, Any]], site_name: str) -> Optional[Di
 # VLAN CSV conversion
 # ------------------------
 VLAN_CSV_FIELDS = [
-    "name", "tag", "subnet", "start_ip", "dhcp_start", "dhcp_end",
-    "interface", "zone", "enabled", "share_over_vpn"
+    "name", "tag", "subnet", "default_gateway", "dhcp_start", "dhcp_end",
+    "interface", "zone", "enabled", "share_over_vpn", "dhcp_service"
 ]
 
 def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
@@ -171,6 +172,25 @@ def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
         return (a.strip(), b.strip())
     return ("", "")
 
+def _map_dhcp_service_for_csv(raw: Optional[str]) -> str:
+    """
+    Convert API value -> CSV display value.
+      inherit       -> on
+      no_dhcp       -> off
+      non-airgapped -> non-airgapped
+      (None/other)  -> ""
+    """
+    if not raw:
+        return ""
+    raw = str(raw).strip().lower()
+    if raw == "inherit":
+        return "on"
+    if raw == "no_dhcp":
+        return "off"
+    if raw == "non-airgapped":
+        return "non-airgapped"
+    return raw
+
 def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for v in vlans:
@@ -179,26 +199,36 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         subnet = str(v.get("subnet") or "").strip()
         iface  = (v.get("interface") or "").strip()
         zone   = (v.get("zone") or "").strip()
-        start_ip = (v.get("start_ip") or "").strip()
-        if not start_ip:
-            # fall back to first of range if present
-            a, _ = _split_range(v)
-            start_ip = a
+
+        # default_gateway preferred; fall back to start_ip/range first address if missing
+        gw = (v.get("default_gateway") or "").strip()
+        if not gw:
+            gw = (v.get("start_ip") or "").strip()
+            if not gw:
+                a, _ = _split_range(v)
+                gw = a
+
         dhcp_start, dhcp_end = _split_range(v)
-        enabled = "TRUE" if bool(v.get("enforcement_on", True)) else "FALSE"
+
+        # Enabled reflects UI "toggle" -> status == "provisioned"
+        status = (v.get("status") or "").strip().lower()
+        enabled = "TRUE" if status == "provisioned" else "FALSE"
+
         share_over_vpn = "TRUE" if bool(v.get("share_over_vpn", False)) else "FALSE"
+        dhcp_service_disp = _map_dhcp_service_for_csv(v.get("dhcp_service"))
 
         out.append({
             "name": name,
             "tag": tag,
             "subnet": subnet,
-            "start_ip": start_ip,
+            "default_gateway": gw,
             "dhcp_start": dhcp_start,
             "dhcp_end": dhcp_end,
             "interface": iface,
             "zone": zone,
             "enabled": enabled,
             "share_over_vpn": share_over_vpn,
+            "dhcp_service": dhcp_service_disp,
         })
     return out
 

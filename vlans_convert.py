@@ -17,65 +17,62 @@
 #
 # Notes:
 #   - CSV columns are aligned with bulk_create.py expectations:
-#       name, tag, subnet, start_ip, dhcp_start, dhcp_end, interface, zone, enabled, share_over_vpn
+#       name, tag, subnet, default_gateway, dhcp_start, dhcp_end, dhcp_service, interface, zone, enabled, share_over_vpn
 #   - "enabled" in CSV reflects UI status:
 #       status == "provisioned"  -> enabled = TRUE
 #       otherwise                -> enabled = FALSE
-#   - start_ip falls back to default_gateway if start_ip missing in JSON.
+#   - default_gateway prefers start_ip, then default_gateway from JSON.
 
-import argparse
-import json
-import csv
+import argparse, json, csv
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return s in ("1", "true", "yes", "y")
 
-def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Convert VLAN JSON -> CSV (for bulk_create)")
+def norm_dhcp_service(val: str) -> str:
+    v = (val or "").strip().lower().replace("-", "_")
+    if v == "on":
+        return "inherit"
+    if v in ("inherit", "non_airgapped", "no_dhcp"):
+        return v
+    # sensible default: if caller omitted, we'll let bulk_create decide based on dhcp_range,
+    # but for display here we return "inherit"
+    return "inherit"
+
+def display_dhcp_service(val: str) -> str:
+    v = norm_dhcp_service(val)
+    return "on" if v == "inherit" else v  # show "on" in CSV for readability
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Convert VLAN JSON -> CSV")
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--site-name", help="Human site name (reads vlans/<site>.json, writes vlans/<site>.csv)")
-    g.add_argument("--from-json", help="Path to a VLAN JSON file")
-    ap.add_argument("--to-csv", help="Output CSV path (optional; defaults beside input)")
-    ap.add_argument("--include-id", action="store_true", help="Add 'vlan_id' column (raw API id) to the CSV")
+    g.add_argument("--site-name", help="Read vlans/<site>.json, write vlans/<site>.csv")
+    g.add_argument("--from-json", help="Path to VLAN JSON")
+    ap.add_argument("--to-csv", help="Output CSV path")
+    ap.add_argument("--include-id", action="store_true", help="Include 'vlan_id' column")
     return ap.parse_args()
 
-
 def read_json(path: Path) -> Any:
-    if not path.exists():
-        raise FileNotFoundError(f"JSON file not found: {path}")
-    text = path.read_text(encoding="utf-8")
     try:
-        return json.loads(text)
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        raise ValueError(f"Failed to parse JSON from {path}: {e}") from e
-
+        raise SystemExit(f"ERROR: failed to read/parse JSON {path}: {e}")
 
 def normalize_rows(data: Any) -> List[Dict[str, Any]]:
-    """
-    Handle the common shapes we’ve seen:
-      - { "rows": [ ... ] }
-      - { "result": { "rows": [ ... ] } }
-      - [ ... ]  (already an array)
-    """
     if isinstance(data, dict):
         if isinstance(data.get("rows"), list):
             return data["rows"]
         if isinstance(data.get("result"), dict) and isinstance(data["result"].get("rows"), list):
             return data["result"]["rows"]
-        return []
     if isinstance(data, list):
         return data
     return []
 
-
-def parse_dhcp_range(v: Any) -> Tuple[str, str]:
-    """
-    Accepts:
-      - "172.16.67.1-172.16.67.254"
-      - [["172.16.67.1","172.16.67.254"], ...]
-      - None / ""
-    Returns (start, end) or ("","") if missing.
-    """
+def parse_dhcp_range(v: Any) -> Tuple[str,str]:
     if isinstance(v, str) and "-" in v:
         a, b = v.split("-", 1)
         return a.strip(), b.strip()
@@ -83,70 +80,62 @@ def parse_dhcp_range(v: Any) -> Tuple[str, str]:
         return str(v[0][0]), str(v[0][1])
     return "", ""
 
-
 def to_out_row(vlan: Dict[str, Any], include_id: bool) -> Dict[str, Any]:
-    # DHCP parse (accepts either dhcp_range string or range_list array)
+    # DHCP range (accept dhcp_range "a-b" or range_list [[a,b],...])
     dhcp_start, dhcp_end = parse_dhcp_range(vlan.get("dhcp_range") or vlan.get("range_list"))
 
-    # Enabled follows UI status (provisioned == enabled)
+    # dhcp_service for display: "on" for inherit, else "non_airgapped"/"no_dhcp"
+    raw_service = vlan.get("dhcp_service")
+    # If API omitted it, infer from presence of a DHCP range
+    if not raw_service:
+        raw_service = "inherit" if (dhcp_start or dhcp_end) else "no_dhcp"
+    display_service = display_dhcp_service(raw_service)
+
+    # enabled follows UI state (status)
     enabled = "TRUE" if vlan.get("status") == "provisioned" else "FALSE"
 
-    # start_ip: prefer explicit start_ip, else default_gateway, else blank
-    start_ip = (vlan.get("start_ip") or vlan.get("default_gateway") or "").strip()
-
     row = {
-        "name":           (vlan.get("display_name") or vlan.get("name") or "").strip(),
-        "tag":            str(vlan.get("tag") or "").strip(),
-        "subnet":         str(vlan.get("subnet") or "").strip(),
-        "start_ip":       start_ip,
+        "tag":            str(vlan.get("tag", "")).strip(),
+        "name":           (vlan.get("name") or vlan.get("display_name") or "").strip(),
+        "display_name":   (vlan.get("display_name") or vlan.get("name") or "").strip(),
+        "subnet":         str(vlan.get("subnet", "")).strip(),
+        "default_gateway": (vlan.get("start_ip") or vlan.get("default_gateway") or "").strip(),
         "dhcp_start":     dhcp_start,
         "dhcp_end":       dhcp_end,
+        "dhcp_service":   display_service,   # <-- for the CSV we show "on"/"non_airgapped"/"no_dhcp"
         "interface":      (vlan.get("interface") or "").strip(),
         "zone":           (vlan.get("zone") or "").strip(),
         "enabled":        enabled,
-        "share_over_vpn": "TRUE" if bool(vlan.get("share_over_vpn", False)) else "FALSE",
+        "share_over_vpn": "TRUE" if _as_bool(vlan.get("share_over_vpn")) else "FALSE",
     }
     if include_id:
         row = {"vlan_id": vlan.get("id", "")} | row
     return row
 
-
-def write_csv(rows: List[Dict[str, Any]], out_path: Path, include_id: bool) -> None:
-    headers = (
-        ["vlan_id", "name", "tag", "subnet", "start_ip", "dhcp_start", "dhcp_end", "interface", "zone", "enabled", "share_over_vpn"]
-        if include_id else
-        ["name", "tag", "subnet", "start_ip", "dhcp_start", "dhcp_end", "interface", "zone", "enabled", "share_over_vpn"]
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as f:
+def write_csv(rows: List[Dict[str, Any]], path: Path, include_id: bool):
+    headers = (["vlan_id"] if include_id else []) + [
+        "tag","name","display_name","subnet","default_gateway",
+        "dhcp_start","dhcp_end","dhcp_service",
+        "interface","zone","enabled","share_over_vpn"
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
         w.writerows(rows)
 
-
 def main():
-    args = parse_args()
-
-    # Resolve in/out paths
-    if args.site_name:
-        json_path = Path("vlans") / f"{args.site_name}.json"
-        csv_path = Path("vlans") / f"{args.site_name}.csv" if not args.to_csv else Path(args.to_csv)
+    a = parse_args()
+    if a.site_name:
+        j = Path("vlans") / f"{a.site_name}.json"
+        c = Path("vlans") / f"{a.site_name}.csv" if not a.to_csv else Path(a.to_csv)
     else:
-        json_path = Path(args.from_json)
-        csv_path = Path(args.to_csv) if args.to_csv else json_path.with_suffix(".csv")
+        j = Path(a.from_json)
+        c = Path(a.to_csv) if a.to_csv else j.with_suffix(".csv")
 
-    # Load + normalize
-    data = read_json(json_path)
-    src_rows = normalize_rows(data)
-
-    # Transform
-    out_rows = [to_out_row(v, args.include_id) for v in src_rows]
-
-    # Write
-    write_csv(out_rows, csv_path, include_id=args.include_id)
-    print(f"Wrote VLAN CSV  →  {csv_path}")
-    print(f"Rows: {len(out_rows)}")
-
+    rows = [to_out_row(v, a.include_id) for v in normalize_rows(read_json(j))]
+    write_csv(rows, c, a.include_id)
+    print(f"Wrote {c} ({len(rows)} rows)")
 
 if __name__ == "__main__":
     main()
