@@ -3,7 +3,7 @@
 ztb_login.py
 - Reads API base + API key from .env or env vars
 - Calls /api/v3/api-key-auth/login
-- Writes BEARER="Bearer <delegate_token>" into your .env
+- Writes BEARER=<delegate_token> (raw token only) into your .env
 - Prints an `export BEARER=...` you can eval to load your shell
 """
 
@@ -88,11 +88,11 @@ def main() -> None:
     except Exception:
         raise SystemExit(f"❌ Unexpected JSON shape:\n{json.dumps(resp.json(), indent=2)}")
 
-    bearer_value = f"Bearer {token}"
-    put_env_var("BEARER", bearer_value)
+    # Save only the RAW token (no "Bearer " prefix)
+    put_env_var("BEARER", token)
 
     print(f"✅ Wrote BEARER to {ENV_PATH.resolve()}")
-    print(f'export BEARER="{bearer_value}"')
+    print(f'export BEARER="{token}"')
 
 if __name__ == "__main__":
     main()

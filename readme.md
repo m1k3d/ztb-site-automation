@@ -25,7 +25,7 @@ Before running any automation scripts, you need a valid bearer token. This repo 
 
 At minimum, set the following:
 
-ZIA_API_BASE=https://<tenant>-api.goairgap.com
+ZIA_API_BASE=https://<tenant>-api.goairgap.com/api/v3
 API_KEY=<your_api_key>
 
 Do not include /api/v3 at the end of the base URL — the script handles that.
