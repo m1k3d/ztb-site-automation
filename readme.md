@@ -27,8 +27,7 @@ At minimum, set the following:
 
 ZIA_API_BASE=https://<tenant>-api.goairgap.com/api/v3
 API_KEY=<your_api_key>
-
-Do not include /api/v3 at the end of the base URL — the script handles that.
+BEARER=""
 
 2. Generate a Bearer Token
 
@@ -37,7 +36,7 @@ Run the login helper:
 python3 ztb_login.py
 
 This will:
-	•	Call the ZIA API with your API key
+	•	Call the ZTB API with your API key
 	•	Write the BEARER="Bearer <delegate_token>" value into your .env
 	•	Print an export BEARER=... line for convenience
 
