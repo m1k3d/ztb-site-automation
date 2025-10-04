@@ -32,7 +32,7 @@ Project root (ztb-site-automation/):
 	•	pull_site.py — Pulls a site configuration from the API into sites.csv and VLAN CSVs.
 	•	vlans_convert.py — Converts VLAN API output ↔ CSV format for editing or comparison.
 	•	ztb_login.py — Authenticates and exports the BEARER token automatically to .env.
-	•	site_template.json.j2 — Jinja2 site creation template (referenced by bulk_create.py).
+	•	site_template.json.j2 — Jinja2 site creation template (used by bulk_create.py).
 	•	sites.csv — Master CSV with one row per site (includes template, WAN, and VLAN file references).
 	•	vlans/ — Folder containing VLAN definitions per site (e.g., Manufacturing-Site.csv).
 	•	.env — Environment variables (tenant API URL, BEARER token, and optional referer path).
@@ -184,8 +184,6 @@ vlan_.csv	VLAN definitions per site
 
 🧩 Extending Functionality (Future Enhancements)
 
-The ZTB Site Automation framework is built to evolve with your deployment needs.
-
 ⚙️ Planned: VRRP Interface and Tracking
 
 Currently, VRRP is not implemented, but can easily be added using:
@@ -215,11 +213,8 @@ The automation will dynamically create a second WAN object when detected.
 🧠 Other Future Ideas
 
 Enhancement	Description	Status
-Automatic Template Validation	Compare pulled site schema vs. template defaults	Planned
-Zone-Aware VLAN Inheritance	Auto-map VLANs to zones	Concept
 DHCP Option Injection	Support custom DHCP options via CSV	Future
 ZPA App Connector Hook	Auto-create ZPA segment for each site	Concept
-Rollback Mechanism	Undo failed site or VLAN creations	Future
 
 
 ⸻
@@ -271,13 +266,6 @@ VLAN ERR 400	Duplicate VLAN tag or HA VLAN conflict	Exclude HA VLANs during pull
 401 Unauthorized	Expired BEARER token	Re-run ztb_login.py
 VLANs not visible	Template missing zone mapping	Check UI template config
 
-
-⸻
-
-🧩 Author Notes
-
-This project is designed to simplify life for network and security engineers deploying dozens or hundreds of SD-WAN sites — without endless clicking in the UI.
-Built with 💙 by Mike Dechow, optimized for real-world Zscaler pre-sales and PoV work.
 
 ⸻
 
