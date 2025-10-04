@@ -11,7 +11,7 @@ Version: 1.3.3
 ## 🚀 Overview
 
 This automation suite is designed to **rapidly deploy Zscaler ZTB sites** — including VLANs, HA pairs, and template-based configurations — using a CSV-driven workflow.  
-It mirrors the same behavior and API calls used by the ZTB UI, but at **enterprise scale**.
+It mirrors the same behavior and API calls used by the ZTB UI, but at **scale**.
 
 ### ✨ Key Capabilities
 
