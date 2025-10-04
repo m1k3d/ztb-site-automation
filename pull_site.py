@@ -3,19 +3,29 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-#version: 1.0.0
+# version: 1.3.2
 # Usage:
-#   python3 pull_site.py                   # lists sites
+#   python3 pull_site.py                                     # lists sites
 #   python3 pull_site.py --site-name "Utrecht-Branch"
 #   python3 pull_site.py --site-name "Utrecht-Branch" --include-wan
 #   python3 pull_site.py --site-name "Utrecht-Branch" --json-only
+#   python3 pull_site.py --site-name "Utrecht-Branch" --include-ha
+#   python3 pull_site.py --list-templates [--template-search "zt800"]   # NEW: list available templates
 #
 # Notes:
 #   - Saves VLAN definitions to vlans/<site>.json and vlans/<site>.csv
 #   - CSV includes "share_over_vpn" (TRUE/FALSE) and "dhcp_service" (on/off/non-airgapped)
 #   - CSV "enabled" = TRUE iff status == "provisioned"
 #   - By default, WAN VLANs are excluded from the CSV (use --include-wan to include them)
+#   - **HA VLANs:** By default, HA internal VLANs (e.g., zone "HA Zone") are excluded from the CSV
+#                   because they’re auto-provisioned during site creation and not editable;
+#                   use --include-ha to include them if you need to round-trip.
 #   - Updates or inserts site row into sites.csv for bulk_create.py
+#   - Supports HA by adding optional *_b / wan1_* fields when a second gateway is present
+#   - lan_interface_name removed: VLAN CSV is source of truth for LAN interfaces
+#   - **Templates:** `--list-templates` shows name/deployment_type/platform_type/id.
+#                   `sites.csv` keeps a `template_id` column but we intentionally leave it BLANK;
+#                   at runtime, bulk_create.py should resolve ID from template_name when empty.
 
 import os, sys, json, csv, argparse, pathlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,26 +53,39 @@ load_env_file(".env")
 # ------------------------
 # Env / session
 # ------------------------
-def get_session_and_bases() -> Tuple[requests.Session, str, str, str, str]:
-    base_v3 = os.environ.get("ZIA_API_BASE", "").rstrip("/")
-    bearer  = os.environ.get("BEARER", "").strip()
-    if not base_v3 or not bearer:
-        print("ERROR: Missing ZIA_API_BASE or BEARER in environment (check .env).", file=sys.stderr)
+def _normalize_base_root(raw: str) -> str:
+    """Accept root or /api/v3 form and return clean ROOT (no trailing slash, no /api/*)."""
+    base = (raw or "").strip().rstrip("/")
+    if base.endswith("/api/v3") or base.endswith("/api/v2"):
+        base = base.rsplit("/api/", 1)[0]
+    return base
+
+def get_session_and_bases():
+    # Prefer ZTB_API_BASE, fallback to legacy ZIA_API_BASE
+    base_env = os.environ.get("ZTB_API_BASE") or os.environ.get("ZIA_API_BASE") or ""
+    bearer   = (os.environ.get("BEARER") or "").strip()
+    base_root = _normalize_base_root(base_env)
+
+    if not base_root or not bearer:
+        print("ERROR: Missing ZTB_API_BASE (or legacy ZIA_API_BASE) and/or BEARER in environment (check .env).", file=sys.stderr)
         sys.exit(1)
-    if "/api/" not in base_v3:
-        print("ERROR: ZIA_API_BASE should look like https://<tenant>-api.../api/v3", file=sys.stderr)
-        sys.exit(1)
+
+    base_v3 = f"{base_root}/api/v3"
+    base_v2 = f"{base_root}/api/v2"
+
+    # Origin/Referer like the UI (root without "-api.")
+    origin_host = base_root.replace("-api.", ".")
+    referer_path = os.getenv("ZTB_REFERER_PATH", "/").lstrip("/")
+    referer = origin_host + (("" if referer_path == "" else f"{referer_path}/"))
 
     s = requests.Session()
     s.headers.update({
+        # NOTE: .env BEARER is the RAW token; add scheme here
         "Authorization": f"Bearer {bearer}",
         "Accept": "application/json",
         "User-Agent": "pull_site.py",
     })
 
-    base_v2 = base_v3.replace("/api/v3", "/api/v2")
-    origin_host = base_v3.split("/api/")[0].replace("-api.", ".")
-    referer = origin_host + "/"
     return s, base_v3, base_v2, origin_host, referer
 
 session, BASE_V3, BASE_V2, ORIGIN, REFERER = get_session_and_bases()
@@ -88,7 +111,28 @@ def get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optiona
         raise ValueError(f"Non-JSON response from {url}: {r.text[:300]}")
 
 def get_json_v3(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    return get_json(f"{BASE_V3}/{path.lstrip('/')}", params=params)
+    # Force trailing slash like many UI calls (Gateway/ vs Gateway)
+    p = path.lstrip("/")
+    if not p.endswith("/"):
+        p += "/"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    return get_json(f"{BASE_V3}/{p}", params=params, headers=headers)
+
+def get_json_v3_no_trailing(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    # Some endpoints (e.g., /templates) are 404-sensitive to a trailing slash.
+    p = path.lstrip("/")
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    return get_json(f"{BASE_V3}/{p}", params=params, headers=headers)
 
 def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
     """
@@ -118,11 +162,14 @@ def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
 # Data access
 # ------------------------
 def list_gateways_rows() -> List[Dict[str, Any]]:
-    data = get_json_v3("Gateway/", params={
+    # Capital 'G' required; trailing slash + UI-ish headers sent by get_json_v3
+    data = get_json_v3("Gateway", params={
         "gateway_type": "isolation",
         "sortdir": "asc",
-        "limit": "100",
+        "sort": "location",
+        "search": "",
         "page": 0,
+        "limit": "100",
         "refresh_token": "enabled",
     })
     if isinstance(data, dict):
@@ -130,7 +177,42 @@ def list_gateways_rows() -> List[Dict[str, Any]]:
             return data["rows"]
         if isinstance(data.get("result"), dict) and isinstance(data["result"].get("rows"), list):
             return data["result"]["rows"]
-    raise ValueError("Unexpected /Gateway/ response; could not find rows list.")
+    raise ValueError("Unexpected /Gateway response; could not find rows list.")
+
+# ---- Templates API (no trailing slash) ----
+def fetch_templates(search: str = "") -> List[Dict[str, Any]]:
+    params = {
+        "sortdir": "asc",
+        "sort": "name",
+        "size": "100",
+        "search": search or "",
+        "page": 0,
+        "refresh_token": "enabled",
+    }
+    data = get_json_v3_no_trailing("templates", params=params)
+    # Normalize: {result:[...]} OR {rows:[...]} OR [...]
+    if isinstance(data, dict):
+        if isinstance(data.get("result"), list):
+            return data["result"]
+        if isinstance(data.get("rows"), list):
+            return data["rows"]
+    if isinstance(data, list):
+        return data
+    return []
+
+def print_templates(templates: List[Dict[str, Any]]):
+    if not templates:
+        print("No templates found.")
+        return
+    hdr = f"{'name':40}  {'deployment_type':18}  {'platform_type':10}  {'id'}"
+    print(hdr)
+    print("-" * len(hdr))
+    for t in templates:
+        name = (t.get("name") or "")[:40]
+        dep  = (t.get("deployment_type") or "")[:18]
+        plat = (t.get("platform_type") or "")[:10]
+        tid  = t.get("id") or ""
+        print(f"{name:40}  {dep:18}  {plat:10}  {tid}")
 
 def print_site_list(rows: List[Dict[str, Any]]):
     print("Available sites:")
@@ -240,12 +322,13 @@ def write_vlans_csv(vlans: List[Dict[str, Any]], path: pathlib.Path):
         w.writerows(rows)
 
 # ------------------------
-# sites.csv helpers
+# sites.csv helpers (HA columns supported, no LAN column)
 # ------------------------
 CSV_HEADER = (
-    "site_name,gateway_name,city,country,wan0_ip,wan0_mask,wan0_gw,"
+    "site_name,gateway_name,gateway_name_b,city,country,"
+    "wan0_ip,wan0_mask,wan0_gw,wan1_ip,wan1_mask,wan1_gw,"
     "template_name,template_id,per_site_dns,dhcp_server_ip,zia_location_name,"
-    "lan_interface_name,wan_interface_name,vlans_file,post\n"
+    "wan_interface_name,wan1_interface_name,vlans_file,post\n"
 )
 
 def ensure_sites_csv_header():
@@ -287,6 +370,23 @@ def is_wan_vlan(v: Dict[str, Any]) -> bool:
         return True
     return False
 
+def is_ha_internal_vlan(v: Dict[str, Any]) -> bool:
+    """
+    Identify the HA internal VLAN that templates auto-create and the UI locks down.
+    Primary signal: zone labeled 'HA Zone' (case-insensitive).
+    Secondary (loose) signals kept in case some tenants don't set zone:
+      - name starts with 'ha-' AND tag == '1'
+    We are conservative: prefer the zone check.
+    """
+    zone = (v.get("zone") or "").strip().lower()
+    if zone.startswith("ha"):
+        return True
+    name = (v.get("display_name") or v.get("name") or "").strip().lower()
+    tag  = str(v.get("tag") or "").strip()
+    if name.startswith("ha-") and tag == "1":
+        return True
+    return False
+
 # ------------------------
 # Main
 # ------------------------
@@ -297,7 +397,17 @@ def main():
     ap.add_argument("--site-name", help="Human site name from the UI (e.g. 'Utrecht-Branch')")
     ap.add_argument("--json-only", action="store_true", help="Skip writing VLAN CSV")
     ap.add_argument("--include-wan", action="store_true", help="Include WAN VLANs in the CSV (default: excluded)")
+    ap.add_argument("--include-ha", action="store_true", help="Include HA internal VLAN(s) in the CSV (default: excluded)")
+    # NEW: templates listing
+    ap.add_argument("--list-templates", action="store_true", help="List templates (name, deployment_type, platform_type, id)")
+    ap.add_argument("--template-search", default="", help="Optional name filter for --list-templates (uses API 'search' param)")
     args = ap.parse_args()
+
+    # Handle template listing early-out
+    if args.list_templates:
+        tpls = fetch_templates(args.template_search)
+        print_templates(tpls)
+        return
 
     rows = list_gateways_rows()
 
@@ -324,31 +434,69 @@ def main():
     vlan_json_path.write_text(json.dumps(vlans_all, indent=2) + "\n", encoding="utf-8")
     print(f"Saved VLANs JSON: {vlan_json_path} (count={len(vlans_all)})")
 
-    vlans = vlans_all if args.include_wan else [v for v in vlans_all if not is_wan_vlan(v)]
+    # CSV is filtered view:
+    vlans = vlans_all
+    filtered = False
     if not args.include_wan:
-        print(f"Filtered out WAN VLANs. CSV count={len(vlans)}")
+        vlans = [v for v in vlans if not is_wan_vlan(v)]
+        filtered = True
+    if not args.include_ha:
+        before = len(vlans)
+        vlans = [v for v in vlans if not is_ha_internal_vlan(v)]
+        if len(vlans) != before:
+            filtered = True
+
+    if filtered:
+        print(f"Filtered CSV view. WAN included={args.include_wan}, HA included={args.include_ha}. CSV count={len(vlans)}")
 
     if not args.json_only:
         vlan_csv_path = OUT_VLANS_DIR / f"{args.site_name}.csv"
         write_vlans_csv(vlans, vlan_csv_path)
         print(f"Saved VLANs CSV : {vlan_csv_path}")
 
-    # sites.csv row (defaults you can edit before bulk_create)
+    # --- Extract per-node WAN fields (supports standalone or HA) ---
+    gws = row.get("gateways") or ci.get("gateways") or []
+    gw_a = gws[0] if isinstance(gws, list) and len(gws) >= 1 else {}
+    gw_b = gws[1] if isinstance(gws, list) and len(gws) >= 2 else {}
+
+    gateway_name_a = row.get("gateway_name") or gw_a.get("gateway_name") or row.get("name") or ""
+    gateway_name_b = gw_b.get("gateway_name", "")
+
+    wan0_ip   = gw_a.get("wan_ip_address", "")
+    wan0_mask = gw_a.get("wan_subnet_mask", "")
+    wan0_gw   = gw_a.get("default_gw_ip", "")
+    wan0_if   = gw_a.get("wan_interface", "") or row.get("wan_interface_name","ge5")
+
+    wan1_ip   = gw_b.get("wan_ip_address", "")
+    wan1_mask = gw_b.get("wan_subnet_mask", "")
+    wan1_gw   = gw_b.get("default_gw_ip", "")
+    wan1_if   = gw_b.get("wan_interface", "")
+
+    # sites.csv row (defaults you can edit before bulk_create) — leave template_id BLANK on purpose
     csv_row = {
         "site_name":           args.site_name,
-        "gateway_name":        row.get("gateway_name") or row.get("name") or "",
+        "gateway_name":        gateway_name_a,
+        "gateway_name_b":      gateway_name_b,
+
         "city":                (row.get("location") or {}).get("city","") if isinstance(row.get("location"), dict) else row.get("city",""),
         "country":             (row.get("location") or {}).get("country","") if isinstance(row.get("location"), dict) else row.get("country",""),
-        "wan0_ip":             "",
-        "wan0_mask":           "",
-        "wan0_gw":             "",
+
+        "wan0_ip":             wan0_ip,
+        "wan0_mask":           wan0_mask,
+        "wan0_gw":             wan0_gw,
+        "wan1_ip":             wan1_ip,
+        "wan1_mask":           wan1_mask,
+        "wan1_gw":             wan1_gw,
+
         "template_name":       row.get("template_name","") or ci.get("template_name",""),
-        "template_id":         row.get("template_id","")   or ci.get("template_id",""),
+        "template_id":         "",  # intentionally blank; resolve by name at runtime in bulk_create.py
         "per_site_dns":        ci.get("per_site_dns","") or row.get("per_site_dns",""),
         "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
         "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or args.site_name,
-        "lan_interface_name":  row.get("lan_interface_name","ge2"),
-        "wan_interface_name":  row.get("wan_interface_name","ge5"),
+
+        "wan_interface_name":  wan0_if,
+        "wan1_interface_name": wan1_if,
+
         "vlans_file":          (OUT_VLANS_DIR / f"{args.site_name}.csv").as_posix(),
         "post":                "0",
     }

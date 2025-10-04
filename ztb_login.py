@@ -2,6 +2,7 @@
 """
 ztb_login.py
 - Reads API base + API key from .env or env vars
+- Prefers ZTB_API_BASE (falls back to legacy ZIA_API_BASE)
 - Calls /api/v3/api-key-auth/login
 - Writes BEARER=<delegate_token> (raw token only) into your .env
 - Prints an `export BEARER=...` you can eval to load your shell
@@ -53,13 +54,16 @@ def normalize_base(raw: str) -> str:
     Returns: https://<tenant>-api.goairgap.com  (no trailing slash)
     """
     base = raw.strip().rstrip("/")
-    # If someone pasted a full /api/v3 base, strip it
     if base.endswith("/api/v3"):
         base = base[: -len("/api/v3")]
     return base
 
 def main() -> None:
-    base_raw = get_env("ZIA_API_BASE") or ""   # e.g. https://<tenant>-api.goairgap.com
+    # Prefer ZTB_API_BASE, fall back to legacy ZIA_API_BASE
+    base_raw = (os.getenv("ZTB_API_BASE") or os.getenv("ZIA_API_BASE") or "").strip()
+    if not base_raw:
+        raise SystemExit("❌ Missing ZTB_API_BASE (or legacy ZIA_API_BASE). Set it in .env")
+
     api_key = get_env("API_KEY") or ""
     base = normalize_base(base_raw)
     url = f"{base}/api/v3/api-key-auth/login"
@@ -85,6 +89,8 @@ def main() -> None:
         data = resp.json()
         # API doc shows: { "result": { "delegate_token": "..." } }
         token = data["result"]["delegate_token"]
+        if not token:
+            raise KeyError("empty token")
     except Exception:
         raise SystemExit(f"❌ Unexpected JSON shape:\n{json.dumps(resp.json(), indent=2)}")
 
