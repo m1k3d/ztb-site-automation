@@ -27,16 +27,20 @@ It mirrors the same behavior and API calls used by the ZTB UI, but at **enterpri
 
 ## 🧩 Directory Layout
 
-ztb-site-automation/
-├── bulk_create.py              # Creates sites + VLANs from CSVs
-├── pull_site.py                # Pulls a site from API into sites.csv and VLAN CSV
-├── vlans_convert.py            # Converts VLAN API output → CSV format
-├── ztb_login.py                # Authenticates and exports BEARER token
-├── site_template.json.j2       # Jinja2 site template
-├── sites.csv                   # CSV with one row per site to create
-├── vlan_.csv         # VLAN definition file per site
-└── .env                        # Environment variables (tenant URL, token, etc.)
+Project root (ztb-site-automation/):
+	•	bulk_create.py — Creates sites and VLANs from CSV definitions.
+	•	pull_site.py — Pulls a site configuration from the API into sites.csv and VLAN CSVs.
+	•	vlans_convert.py — Converts VLAN API output ↔ CSV format for editing or comparison.
+	•	ztb_login.py — Authenticates and exports the BEARER token automatically to .env.
+	•	site_template.json.j2 — Jinja2 site creation template (referenced by bulk_create.py).
+	•	sites.csv — Master CSV with one row per site (includes template, WAN, and VLAN file references).
+	•	vlans/ — Folder containing VLAN definitions per site (e.g., Manufacturing-Site.csv).
+	•	.env — Environment variables (tenant API URL, BEARER token, and optional referer path).
 
+Optional folders (recommended):
+	•	logs/ — Stores execution logs, debug traces, and run summaries.
+	•	archive/ — Keeps historical VLAN CSVs or site exports for version tracking.
+	•	examples/ — Contains sample templates, CSVs, and example payloads for reference.
 ---
 
 ## ⚙️ Before You Begin
