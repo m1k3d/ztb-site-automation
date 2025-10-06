@@ -1,0 +1,46 @@
+{
+  "name": "{{ site_name }}",
+  "site_name": "{{ site_name }}",
+  {# --- DHCP service fields are included only when explicitly set in Python --- #}
+  {% if dhcp_service_mode %}
+  "dhcp_service": "{{ dhcp_service_mode }}",
+  {% if dhcp_service_mode == "relay" and dhcp_server_ip %}
+  "dhcp_server_ip": "{{ dhcp_server_ip }}",
+  {% endif %}
+  {% endif %}
+
+  "location": {
+    "is_existing_location": false,
+    "details": {
+      "country": "{{ country | upper | replace(' ', '_') | replace('-', '_') }}",
+      "name": "{{ site_name }}"
+    }
+  },
+
+  "private_dns": "{{ per_site_dns }}",
+
+  "gateways": [
+    {
+      "gateway_name": "{{ gateway_name }}",
+      "is_wan_dhcp": {{ "true" if not wan0_ip else "false" }},
+      {% if wan0_ip %}
+      "wan_ip_address": "{{ wan0_ip }}",
+      "wan_subnet_mask": "{{ wan0_mask }}",
+      "default_gw_ip": "{{ wan0_gw }}",
+      {% endif %}
+      "wan_interface": "{{ wan_interface_name }}"
+    }
+    {% if gateway_name_b %}
+    ,{
+      "gateway_name": "{{ gateway_name_b }}",
+      "is_wan_dhcp": {{ "true" if not wan1_ip else "false" }},
+      {% if wan1_ip %}
+      "wan_ip_address": "{{ wan1_ip }}",
+      "wan_subnet_mask": "{{ wan1_mask }}",
+      "default_gw_ip": "{{ wan1_gw }}",
+      {% endif %}
+      "wan_interface": "{{ wan1_interface_name }}"
+    }
+    {% endif %}
+  ]
+}
