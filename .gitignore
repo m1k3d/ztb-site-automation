@@ -18,6 +18,5 @@ venv/
 .env
 
 # Local output
-vlans/*.json
 out/
 archive/
