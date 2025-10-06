@@ -1,0 +1,7 @@
+name,tag,subnet,default_gateway,dhcp_start,dhcp_end,interface,zone,enabled,share_over_vpn,dhcp_service
+ENERGY,67,24,172.16.67.1,172.16.67.2,172.16.67.254,ge2,LAN Zone,TRUE,TRUE,on
+FACTORY,68,24,172.16.68.1,172.16.68.2,172.16.68.221,ge2,LAN Zone,TRUE,TRUE,on
+Guest,169,24,172.16.169.1,172.16.169.1,172.16.169.254,ge2,LAN Zone,TRUE,TRUE,on
+mgmt,1,24,172.16.199.169,172.16.199.1,172.16.199.254,ge1,Management Zone,TRUE,FALSE,off
+mgmt-switch,999,24,172.16.69.1,172.16.69.1,172.16.69.254,ge2,LAN Zone,TRUE,TRUE,on
+OT,66,24,172.16.66.1,172.16.66.2,172.16.66.254,ge2,LAN Zone,TRUE,TRUE,on

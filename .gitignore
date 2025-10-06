@@ -18,5 +18,6 @@ venv/
 .env
 
 # Local output
+vlan/*.json
 out/
 archive/
