@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
-# bulk_create.py — Deploys sites + VLANs to ZTB from sites.csv and VLAN CSVs
-#
-# Author: Mike Dechow (@m1k3d)
-# Repo: github.com/m1k3d/ztb-site-automation
-# License: MIT
-# Version: 1.3.4 (HA + name→id template resolution + DHCP relay inference + UI-accurate endpoints)
-#
-# Usage:
-#   python3 bulk_create.py --dry-run           # Validate payloads, do not POST
-#   python3 bulk_create.py                     # Create sites and VLANs
-#   python3 bulk_create.py --debug             # Verbose HTTP (slash/no-slash differences)
-#   python3 bulk_create.py --csv other.csv     # Use a different sites.csv
-#
-# Notes:
-#   - Reads rows from sites.csv where post=1
-#   - Renders site payload from site_template.json.j2
-#   - Creates site (v3): POST /api/v3/templates/{template_id}/deploy_site?refresh_token=enabled
-#   - Waits for gateway id(s) + cluster id to appear in /api/v3/Gateway results
-#   - Posts VLANs (v2): POST /api/v2/Network/?refresh_token=enabled
-#     • Standalone → "gateways": "<gwA>",       "interface": "ge5"
-#     • HA         → "gateways": "<gwA>,<gwB>", "interface": "ge5,ge5" (auto-duplicates if CSV has one)
-#   - After creation: PUT status=provisioned (enable), PATCH share_over_vpn, and PUT dhcp_service (if specified)
-#   - VLAN CSV format unchanged:
-#       name,tag,subnet,default_gateway,dhcp_start,dhcp_end,interface,zone,enabled,share_over_vpn,dhcp_service
-#     · dhcp_service (CSV): on | inherit | non-airgapped | no_dhcp | off
-#       (API sent: inherit | non_airgapped | no_dhcp)
-#
-# Environment (.env):
-#   ZTB_API_BASE=https://<tenant>-api.goairgap.com      # or legacy ZIA_API_BASE
-#   BEARER=<raw-token>                                  # raw token; we add 'Bearer ' automatically
-#   ZTB_REFERER_PATH=/ztb/sites                         # optional; helps some tenants
-#
-# What changed from your last 1.3.x:
-#   • Template name→id resolution: if template_id is blank but template_name is set, we resolve it at runtime
-#   • HA VLAN post matches the UI: comma-joined gateway ids and (if needed) duplicated interface "geX,geX"
-#   • v3 “Gateway” and “templates” endpoints try no-slash first, then fallback to trailing slash (tenant quirks)
-#   • Optional per_site_dns in sites.csv flows into VLAN per_network_dns (safe if empty)
-#   • NEW: DHCP relay inference & validation:
-#       - If sites.csv has dhcp_server_ip (non-empty), we assume relay and inject
-#         {"dhcp_service": "relay", "dhcp_server_ip": "<ip>"} into the site payload.
-#       - If relay is requested but no IP is present, the row hard-fails with a clear error.
-#       - If blank, template defaults apply and we don’t send DHCP keys.
+"""
+bulk_create.py — Deploys sites + VLANs to ZTB from sites.csv and VLAN CSVs
 
-import os, sys, csv, json, time, ipaddress, argparse, pathlib
-from typing import Any, Dict, List, Tuple, Optional
+Author: Mike Dechow (@m1k3d)
+Repo: github.com/m1k3d/ztb-site-automation
+License: MIT
+
+Version: 1.4.0
+  - VRRP after VLANs
+  - VRRP link discovered via GET /api/v2/Gateway/interfaces (type == "ha"), with optional CSV override
+  - Tracked interfaces strictly LAN+WAN (never mgmt, never the HA link), and must exist on all HA peers (intersection)
+  - VRRP is POST-only (no PUT fallback)
+  - Keeps WAN+LAN inference from sites.csv + VLAN CSV
+  - Cleaner debug and dry-run previews
+
+Usage:
+  python3 bulk_create.py --dry-run
+  python3 bulk_create.py
+  python3 bulk_create.py --debug
+  python3 bulk_create.py --csv other.csv
+
+Environment (.env):
+  ZTB_API_BASE=https://<tenant>-api.goairgap.com
+  BEARER=<raw-token>
+"""
+
+import os, sys, csv, json, time, ipaddress, argparse, pathlib, subprocess, re
+from typing import Any, Dict, List, Tuple, Optional, Iterable, Set
 import requests
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # ------------------------
-# tiny .env loader
+# tiny .env loader (OVERWRITES existing env vars)
 # ------------------------
 def load_env_file(path: str = ".env"):
     p = pathlib.Path(path)
@@ -61,36 +44,81 @@ def load_env_file(path: str = ".env"):
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip().strip('"').strip("'")
-        if k and k not in os.environ:
+        if k:
             os.environ[k] = v
 
 load_env_file(".env")
 
 DEBUG = False
 
-# -------- env / session --------
+# Short, sensible polling defaults
+POLL_RETRIES = 12
+POLL_DELAY_S = 2.0
+
+# Paths needed early (for ztb_login.py)
+ROOT = pathlib.Path(__file__).resolve().parent
+TEMPLATE_PATH = ROOT / "site_template.json.j2"
+LOGIN_SCRIPT = ROOT / "ztb_login.py"
+
+# -------- auth helpers --------
 def _normalize_base_root(raw: str) -> str:
-    """Accept root or /api/v3|v2 and return a clean ROOT (no trailing slash, no /api/*)."""
     base = (raw or "").strip().rstrip("/")
     if base.endswith("/api/v3") or base.endswith("/api/v2"):
         base = base.rsplit("/api/", 1)[0]
     return base
 
+def _ensure_bearer_present_or_login():
+    bearer = (os.environ.get("BEARER") or "").strip()
+    if bearer:
+        return
+    if not LOGIN_SCRIPT.exists():
+        print("ERROR: BEARER not set and ztb_login.py not found. Please run login manually.", file=sys.stderr)
+        sys.exit(1)
+    print("🔐 BEARER missing — invoking ztb_login.py to obtain a fresh token…")
+    try:
+        subprocess.run([sys.executable, str(LOGIN_SCRIPT)], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: ztb_login.py failed with exit code {e.returncode}", file=sys.stderr)
+        sys.exit(1)
+    load_env_file(".env")  # overwrite back into process
+
+def _refresh_bearer_and_update_session(session: requests.Session) -> bool:
+    if not LOGIN_SCRIPT.exists():
+        print("ERROR: Cannot refresh token automatically (ztb_login.py not found).", file=sys.stderr)
+        return False
+    print("🔄 401 Unauthorized — refreshing token via ztb_login.py and retrying once…")
+    try:
+        subprocess.run([sys.executable, str(LOGIN_SCRIPT)], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: ztb_login.py failed with exit code {e.returncode}", file=sys.stderr)
+        return False
+    load_env_file(".env")
+    new_bearer = (os.environ.get("BEARER") or "").strip()
+    if not new_bearer:
+        print("ERROR: ztb_login.py ran but BEARER is still empty.", file=sys.stderr)
+        return False
+    session.headers["Authorization"] = f"Bearer {new_bearer}"
+    return True
+
+# -------- env / session --------
 def get_sessions_and_bases() -> Tuple[requests.Session, str, str, str, str]:
-    # Prefer ZTB_API_BASE, fallback to legacy ZIA_API_BASE (compatible)
     base_env = os.environ.get("ZTB_API_BASE") or os.environ.get("ZIA_API_BASE") or ""
-    bearer   = (os.environ.get("BEARER") or "").strip()
     base_root = _normalize_base_root(base_env)
-    if not base_root or not bearer:
-        print("ERROR: Missing ZTB_API_BASE (or ZIA_API_BASE) and/or BEARER in .env", file=sys.stderr)
+    if not base_root:
+        print("ERROR: Missing ZTB_API_BASE (or ZIA_API_BASE) in .env", file=sys.stderr)
+        sys.exit(1)
+
+    _ensure_bearer_present_or_login()
+    bearer = (os.environ.get("BEARER") or "").strip()
+    if not bearer:
+        print("ERROR: BEARER still missing after ztb_login.py.", file=sys.stderr)
         sys.exit(1)
 
     base_v3 = f"{base_root}/api/v3"
     base_v2 = f"{base_root}/api/v2"
 
     origin_host = base_root.replace("-api.", ".")
-    referer_path = os.getenv("ZTB_REFERER_PATH", "/").lstrip("/")
-    referer = origin_host + (("" if referer_path == "" else f"{referer_path}/"))
+    referer = origin_host + "/"
 
     s = requests.Session()
     s.headers.update({
@@ -102,9 +130,6 @@ def get_sessions_and_bases() -> Tuple[requests.Session, str, str, str, str]:
     return s, base_v3, base_v2, origin_host, referer
 
 session, API_V3, API_V2, ORIGIN, REFERER = get_sessions_and_bases()
-
-ROOT = pathlib.Path(__file__).resolve().parent
-TEMPLATE_PATH = ROOT / "site_template.json.j2"
 
 # -------- utils --------
 def read_csv_rows(p: pathlib.Path) -> List[Dict[str, str]]:
@@ -123,9 +148,17 @@ def _d(method: str, url: str, status: int):
     if DEBUG:
         print(f"* {method} {url}\n  -> {status}")
 
+# Central request wrapper with 401 refresh
+def _request_with_auto_refresh(method: str, url: str, *, params=None, headers=None, timeout=60, json=None, data=None) -> requests.Response:
+    r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
+    if r.status_code == 401:
+        if _refresh_bearer_and_update_session(session):
+            r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
+    return r
+
 def get_json(url: str, params: Optional[Dict[str, str]] = None, headers: Optional[Dict[str, str]] = None) -> Any:
-    r = session.get(url, params=params, headers=headers, timeout=60)
-    _d("GET", r.url, r.status_code)
+    r = _request_with_auto_refresh("GET", url, params=params, headers=headers, timeout=60)
+    _d("GET", getattr(r, "url", url), r.status_code)
     if r.status_code != 200:
         raise RuntimeError(f"GET {url} -> {r.status_code}: {r.text[:300]}")
     try:
@@ -133,25 +166,25 @@ def get_json(url: str, params: Optional[Dict[str, str]] = None, headers: Optiona
     except Exception:
         raise ValueError(f"Non-JSON response from {url}: {r.text[:300]}")
 
-def post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
-    data = json.dumps(payload)
-    r = session.post(url, data=data, headers=headers, timeout=90)
+def post_raw(url: str, data: str, headers: Optional[Dict[str, str]] = None, timeout: int = 90) -> requests.Response:
+    r = _request_with_auto_refresh("POST", url, headers=headers, timeout=timeout, data=data)
     _d("POST", url, r.status_code)
     return r
 
+def post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
+    return post_raw(url, json.dumps(payload), headers=headers, timeout=90)
+
 def put_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
-    data = json.dumps(payload)
-    r = session.put(url, data=data, headers=headers, timeout=90)
+    r = _request_with_auto_refresh("PUT", url, headers=headers, timeout=90, data=json.dumps(payload))
     _d("PUT", url, r.status_code)
     return r
 
 def patch_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
-    data = json.dumps(payload)
-    r = session.patch(url, data=data, headers=headers, timeout=90)
+    r = _request_with_auto_refresh("PATCH", url, headers=headers, timeout=90, data=json.dumps(payload))
     _d("PATCH", url, r.status_code)
     return r
 
-# ---------- v3 helpers (UI-accurate; try no-slash then slash) ----------
+# ---------- v3 helpers ----------
 def _v3_headers() -> Dict[str, str]:
     return {
         "Accept": "application/json, text/plain, */*",
@@ -162,7 +195,6 @@ def _v3_headers() -> Dict[str, str]:
     }
 
 def get_json_v3_gateway(params: Dict[str, str]) -> Any:
-    """Some tenants want /Gateway, others /Gateway/. Try no-slash first, then fallback."""
     headers = _v3_headers()
     primary = f"{API_V3}/Gateway"
     try:
@@ -177,7 +209,6 @@ def get_json_v3_detail(path: str) -> Any:
 
 # --- templates list (for name→id resolution) ---
 def get_json_v3_templates() -> List[Dict[str, Any]]:
-    """Fetch /api/v3/templates; normalize to a list of template dicts."""
     headers = _v3_headers()
     base = f"{API_V3}/templates"
     try:
@@ -197,7 +228,6 @@ def get_json_v3_templates() -> List[Dict[str, Any]]:
     return []
 
 class TemplateResolver:
-    """Caches template list for this run and resolves exact (case-insensitive) name → id."""
     def __init__(self):
         self._by_lower_name: Dict[str, List[Dict[str, Any]]] = {}
         self._loaded = False
@@ -217,9 +247,24 @@ class TemplateResolver:
         hits = self._by_lower_name.get(name.strip().lower(), [])
         if len(hits) == 1:
             return hits[0].get("id")
-        return None  # ambiguous or not found
+        return None
 
 TEMPLATES = TemplateResolver()
+
+def ensure_template_id_for_row(row: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    tid = (row.get("template_id") or "").strip()
+    if tid:
+        return True, tid, None
+    tname = (row.get("template_name") or "").strip()
+    if not tname:
+        return False, None, "missing template_id and template_name"
+    resolved = TEMPLATES.resolve(tname)
+    if resolved:
+        row["template_id"] = resolved
+        return True, resolved, None
+    all_items = get_json_v3_templates()
+    names_hint = ", ".join(sorted({it.get("name","") for it in all_items if it.get("name")}))
+    return False, None, f"could not resolve template_id from template_name='{tname}'. Available names: {names_hint}"
 
 # -------- value normalization --------
 def _clean_bool(v: Any) -> bool:
@@ -232,15 +277,6 @@ def _split_dhcp(start: str, end: str) -> Optional[str]:
     return None
 
 def norm_dhcp_service(val: str, has_range: bool) -> str:
-    """
-    CSV → API mapping:
-      on -> inherit
-      inherit -> inherit
-      non-airgapped/non_airgapped -> non_airgapped
-      off -> no_dhcp
-      no_dhcp -> no_dhcp
-    Default: if blank, inherit when a range is present else no_dhcp.
-    """
     v = (val or "").strip().lower().replace("-", "_")
     if v == "on": return "inherit"
     if v in ("inherit", "non_airgapped", "no_dhcp"): return v
@@ -299,10 +335,6 @@ def load_vlans(vlans_file: str) -> List[Dict[str, Any]]:
 
 # -------- HA validation (sites.csv sanity) --------
 def validate_row_is_ha_consistent(row: Dict[str, str]) -> None:
-    """
-    If any WAN1_* values are present, gateway_name_b must be present, and vice-versa.
-    This helps avoid partial HA rows.
-    """
     b_name = (row.get("gateway_name_b") or "").strip()
     b_fields = [
         (row.get("wan1_ip") or "").strip(),
@@ -315,6 +347,9 @@ def validate_row_is_ha_consistent(row: Dict[str, str]) -> None:
         raise SystemExit(f"❌ Row '{row.get('site_name')}' has WAN1 values but no gateway_name_b.")
     if b_name and not all(bool(x) for x in b_fields):
         raise SystemExit(f"❌ Row '{row.get('site_name')}' missing one or more WAN1 fields for HA site.")
+
+def is_ha_gateways_str(gateways_str: str) -> bool:
+    return "," in (gateways_str or "")
 
 # -------- lookups (gateways / templates) --------
 def get_json_v3_gateway_list(site_name: str) -> Dict[str, Any]:
@@ -343,14 +378,41 @@ def find_site_row_by_name(site_name: str) -> Optional[Dict[str, Any]]:
 def get_gateway_detail_v3(gateway_id: str) -> Dict[str, Any]:
     return get_json_v3_detail(f"Gateway/{gateway_id}")
 
-def resolve_gateway_ids_and_cluster(site_name: str, retries: int = 40, delay: float = 3.0) -> Tuple[Optional[str], Optional[int]]:
-    """
-    Poll for gateway ids (standalone: 'idA', HA: 'idA,idB') and cluster_id after site creation.
-    """
-    for _ in range(retries):
+def _parse_cluster_id_from_create_resp(text: str) -> Optional[int]:
+    if not text:
+        return None
+    try:
+        j = json.loads(text)
+        for k in ("cluster_id", "clusterId"):
+            if k in j and isinstance(j[k], (int, str)):
+                try:
+                    return int(j[k])
+                except:
+                    pass
+        for key in ("result", "data"):
+            if key in j and isinstance(j[key], dict):
+                for k in ("cluster_id", "clusterId"):
+                    if k in j[key]:
+                        try:
+                            return int(j[key][k])
+                        except:
+                            pass
+    except Exception:
+        pass
+    m = re.search(r'"cluster[_ ]?id"\s*:\s*(\d+)', text, re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except:
+            return None
+    return None
+
+def resolve_gateway_ids_and_cluster(site_name: str, *, prefer_cluster_id: Optional[int] = None, retries: int = POLL_RETRIES, delay: float = POLL_DELAY_S) -> Tuple[Optional[str], Optional[int]]:
+    wanted_cluster = prefer_cluster_id
+    for _ in range(max(1, retries)):
         row = find_site_row_by_name(site_name)
         gw_ids_str = None
-        cl_id = None
+        cl_id = wanted_cluster
 
         if row:
             gws = row.get("gateways") or []
@@ -359,51 +421,246 @@ def resolve_gateway_ids_and_cluster(site_name: str, retries: int = 40, delay: fl
                 if ids:
                     gw_ids_str = ",".join(ids)
             ci = row.get("cluster_info") or {}
-            cl_id = ci.get("cluster_id")
+            found_cluster = ci.get("cluster_id")
+            if not cl_id and found_cluster:
+                cl_id = int(found_cluster)
 
-        if gw_ids_str and not cl_id:
-            try:
-                first_id = gw_ids_str.split(",")[0]
-                det = get_gateway_detail_v3(first_id)
-                cl_id = det.get("cluster_id") or (det.get("cluster") or {}).get("cluster_id")
-            except Exception:
-                pass
-
+        if wanted_cluster and gw_ids_str:
+            return gw_ids_str, int(wanted_cluster)
         if gw_ids_str and cl_id:
             return gw_ids_str, int(cl_id)
-
         time.sleep(delay)
 
-    return None, None
+    return None, wanted_cluster if wanted_cluster else None
 
-# --- template id resolution for each row ---
-def ensure_template_id_for_row(row: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[str]]:
+# -------- Interfaces discovery (v2) --------
+def get_gateway_interfaces_v2(site_id: str) -> List[Dict[str, Any]]:
     """
-    Return (ok, template_id, err_msg). If csv has template_id -> return it.
-    Else, resolve from template_name via /api/v3/templates (exact, case-insensitive).
+    GET /api/v2/Gateway/interfaces?siteID=<site_id>
+    Returns a list:
+    [
+      {"gateway_id":"...","gateway_name":"...", "interfaces":[{"name":"ge4","interface_type":"ha"}, ...]},
+      ...
+    ]
     """
-    tid = (row.get("template_id") or "").strip()
-    if tid:
-        return True, tid, None
-    tname = (row.get("template_name") or "").strip()
-    if not tname:
-        return False, None, "missing template_id and template_name"
-    resolved = TEMPLATES.resolve(tname)
-    if resolved:
-        row["template_id"] = resolved  # make available to Jinja
-        return True, resolved, None
-    all_items = get_json_v3_templates()
-    names_hint = ", ".join(sorted({it.get("name","") for it in all_items if it.get("name")}))
-    return False, None, f"could not resolve template_id from template_name='{tname}'. Available names: {names_hint}"
+    url = f"{API_V2}/Gateway/interfaces"
+    params = {"siteID": site_id, "refresh_token": "enabled"}
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN, "Referer": REFERER,
+    }
+    data = get_json(url, params=params, headers=headers)
+    return data if isinstance(data, list) else []
 
-# -------- v3/v2 API calls --------
-def create_site(template_id: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
+def discover_iface_inventory(site_id: str, gateways_str: str):
+    """
+    From interfaces GET, derive:
+      - ha_link_map: {gateway_uuid: ha_iface_name}
+      - mgmt_names: set of management iface names (e.g., {'ge1'})
+      - common_trackables: names present on ALL peers whose type is LAN or WAN
+    """
+    items = get_gateway_interfaces_v2(site_id)
+    gw_ids = {g.strip() for g in str(gateways_str or "").split(",") if g.strip()}
+
+    ha_link_map: Dict[str, str] = {}
+    mgmt_names: Set[str] = set()
+    per_gw_trackables: List[Set[str]] = []
+
+    for gw in items:
+        gwid = gw.get("gateway_id")
+        if not gwid or gwid not in gw_ids:
+            continue
+        names_trackable: Set[str] = set()
+        for itf in gw.get("interfaces", []):
+            name = (itf.get("name") or "").strip().lower()
+            if not name:
+                continue
+            itype = (itf.get("interface_type") or "").strip().lower()
+            if itype == "ha":
+                ha_link_map[gwid] = name
+            elif itype == "management":
+                mgmt_names.add(name)
+            elif itype in ("lan", "wan"):
+                names_trackable.add(name)
+        per_gw_trackables.append(names_trackable)
+
+    common_trackables = set.intersection(*per_gw_trackables) if per_gw_trackables else set()
+
+    if DEBUG:
+        print("Interfaces discovery:")
+        print("  HA link map:", ha_link_map)
+        print("  mgmt names :", mgmt_names)
+        print("  common trackables:", sorted(common_trackables))
+
+    return ha_link_map, mgmt_names, common_trackables
+
+# -------- VRRP helpers --------
+def _clean_iface(x: str) -> str:
+    return (x or "").strip().lower()
+
+def _unique_preserve(seq: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for s in seq:
+        s = _clean_iface(s)
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+def _collect_wan_ifaces_from_row(row: Dict[str, str]) -> List[str]:
+    candidates = [
+        "wan_interface_name", "wan0_interface_name", "wan0_interface",
+        "wan_interface", "wan1_interface_name", "wan1_interface"
+    ]
+    vals = []
+    for k in candidates:
+        v = _clean_iface(row.get(k, ""))
+        if v:
+            vals.append(v)
+    return _unique_preserve(vals)
+
+def _collect_lan_ifaces_from_vlans(vlans: List[Dict[str, Any]], exclude: Iterable[str]) -> List[str]:
+    ex = { _clean_iface(x) for x in exclude }
+    found: List[str] = []
+    for v in vlans:
+        iface = _clean_iface(v.get("interface", ""))
+        if not iface:
+            continue
+        iface = iface.split(",")[0].strip()
+        if "." in iface:
+            iface = iface.split(".", 1)[0]
+        if not iface or iface == "mgmt" or iface in ex:
+            continue
+        if iface not in found:
+            found.append(iface)
+    return found
+
+def _vrrp_headers() -> Dict[str, str]:
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/json",
+    }
+
+def _vrrp_url(cluster_id: int) -> str:
+    return f"{API_V3}/vrrp/config/{cluster_id}?refresh_token=enabled"
+
+def post_vrrp(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> Tuple[bool, str, int]:
+    body = json.dumps(payload)
+    r = post_raw(url, body, headers=headers, timeout=60)
+    return (r.status_code in (200, 204)), (r.text or "")[:300], r.status_code
+
+def build_vrrp_payload(
+    cluster_id: int,
+    gateways_str: str,
+    row: Dict[str, str],
+    vlans: List[Dict[str, Any]],
+    *,
+    site_id: str,
+    vrid: str = "16"
+) -> Tuple[Optional[Dict[str,Any]], Optional[str], Optional[str]]:
+    """
+    Compose the VRRP payload using interface discovery:
+      - vrrp_interface: HA link per gateway UUID (from GET), unless csv override present
+      - track_interface: strictly LAN + WAN (csv-derived), excluding mgmt and HA link,
+                         and must exist on ALL HA peers (intersection)
+    Returns: (payload or None, link_iface_used or None, track_value or None)
+    """
+    if "," not in (gateways_str or ""):
+        return None, None, None  # standalone
+
+    # sanitize VRID
+    try:
+        n = int(str(vrid).strip()); n = max(1, min(255, n))
+        vrid = str(n)
+    except Exception:
+        vrid = "16"
+
+    # Discover actual interfaces on the device(s)
+    ha_link_map, mgmt_names, common_trackables = discover_iface_inventory(site_id, gateways_str)
+
+    # CSV override for HA link (optional)
+    csv_link = (row.get("vrrp_link_interface") or "").strip().lower()
+    if csv_link and "." in csv_link:
+        csv_link = csv_link.split(".", 1)[0]
+
+    # Ensure we have HA link per gateway (from discovery) when no override given
+    keys = [g.strip() for g in str(gateways_str).split(",") if g.strip()]
+    if not csv_link:
+        missing = [k for k in keys if k not in ha_link_map or not ha_link_map[k]]
+        if missing:
+            raise SystemExit(
+                f"❌ VRRP HA link unknown for some gateways (no 'ha' iface discovered). "
+                f"Add vrrp_link_interface in sites.csv or verify template brings up HA ports."
+            )
+
+    # Build candidate track list from CSVs
+    wan_ifaces = _collect_wan_ifaces_from_row(row)
+    lan_ifaces = _collect_lan_ifaces_from_vlans(vlans, exclude=wan_ifaces)
+    raw_track = _unique_preserve([*wan_ifaces, *lan_ifaces])
+
+    # Exclusions: mgmt, HA link (from discovery or override), and ensure present on all peers
+    ha_names = set(ha_link_map.values())
+    link_name_to_exclude = csv_link or (next(iter(ha_names)) if ha_names else "")
+    track_filtered = [
+        i for i in raw_track
+        if i and i not in mgmt_names and i != "mgmt" and i != link_name_to_exclude
+    ]
+    track_final = [i for i in track_filtered if i in common_trackables]
+
+    # Optional extras from CSV (apply same filters)
+    extras = (row.get("vrrp_track_extra") or "").strip().lower()
+    if extras:
+        extra_list = [x.strip() for x in extras.split(",") if x.strip()]
+        for e in extra_list:
+            if e in common_trackables and e not in mgmt_names and e != link_name_to_exclude and e not in track_final:
+                track_final.append(e)
+
+    if not track_final:
+        raise SystemExit(
+            f"❌ VRRP track list empty after validation. "
+            f"Ensure WAN/LAN names in CSVs match real device interfaces and exist on both HA peers."
+        )
+
+    link_iface_used = csv_link or link_name_to_exclude
+    track_value = ",".join(track_final)
+
+    vrrp_interface_map = {k: (csv_link or ha_link_map[k]) for k in keys}
+    track_map = {k: track_value for k in keys}
+
+    payload = {
+        "virtual_router_id": vrid,
+        "advert_int": 10,
+        "priority": 254,
+        "vip": "0.0.0.0",
+        "authentication_password": "",
+        "track_interface": track_map,
+        "vrrp_interface":  vrrp_interface_map,
+    }
+
+    if DEBUG:
+        print("VRRP payload (keys redacted):", json.dumps(payload, indent=2))
+
+    return payload, link_iface_used, track_value
+
+# -------- site creation (v3) --------
+def create_site(template_id: str, payload: Dict[str, Any]) -> Tuple[bool, str, Optional[int]]:
     url = f"{API_V3}/templates/{template_id}/deploy_site?refresh_token=enabled"
     r = post_json(url, payload, headers=_v3_headers())
-    if r.status_code in (200,201,202):
-        return True, r.text
-    return False, f"{r.status_code} {r.text[:300]}"
+    cid = None
+    try:
+        cid = _parse_cluster_id_from_create_resp(r.text or "")
+    except Exception:
+        cid = None
+    if r.status_code in (200, 201, 202):
+        return True, r.text, cid
+    return False, f"{r.status_code} {r.text[:300]}", cid
 
+# --- v2 VLAN helpers ---
 def _network_base_from_start(start_ip: str, subnet_bits: str) -> Optional[str]:
     s = (start_ip or "").strip()
     b = (subnet_bits or "").strip()
@@ -420,17 +677,12 @@ def _short_name(name: str, maxlen: int = 16) -> str:
     return n if len(n) <= maxlen else n[:maxlen]
 
 def _maybe_dup_interface_for_ha(interface: str, gateways_str: str) -> str:
-    """
-    If HA (gateways_str has a comma) and CSV provides a single interface ('ge5'),
-    duplicate as 'ge5,ge5'. If CSV already has 'ge5,ge6', keep as-is.
-    """
     if "," in gateways_str:
         if interface and "," not in interface:
             return f"{interface},{interface}"
     return interface
 
 def vlan_to_v2_payload(vlan: Dict[str, Any], gateways_str: str, cluster_id: int, per_network_dns: str = "") -> Dict[str, Any]:
-    """Build the v2 Network payload. Handles standalone vs HA for gateways/interface."""
     start_ip = vlan.get("start_ip") or vlan.get("default_gateway") or ""
     subnet   = str(vlan.get("subnet") or "").strip()
     ip_range = _network_base_from_start(start_ip, subnet) or vlan.get("ip_range") or ""
@@ -449,8 +701,8 @@ def vlan_to_v2_payload(vlan: Dict[str, Any], gateways_str: str, cluster_id: int,
         "slash30_range": "",
         "airgap_plus_mask": 30,
         "default_gateway": start_ip,
-        "gateways": gateways_str,   # standalone: "idA"; HA: "idA,idB"
-        "interface": interface,     # standalone: "ge5"; HA: "ge5,ge5" (auto if needed)
+        "gateways": gateways_str,
+        "interface": interface,
         "name": safe_name,
         "cluster_id": int(cluster_id),
         "event_type": "addnetwork",
@@ -459,7 +711,6 @@ def vlan_to_v2_payload(vlan: Dict[str, Any], gateways_str: str, cluster_id: int,
     }
 
 def post_vlan(vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
-    # Many tenants require the trailing slash on v2/Network
     url = f"{API_V2}/Network/?refresh_token=enabled"
     headers = {
         "Accept": "application/json, text/plain, */*",
@@ -472,7 +723,6 @@ def post_vlan(vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
         return True, r.text
     return False, f"{r.status_code} {r.text[:300]}"
 
-# --- helpers: fetch VLANs for site and build a map so we can PATCH/PUT by id ---
 def list_site_vlans_v2(site_id: str) -> List[Dict[str, Any]]:
     url = f"{API_V2}/Network/"
     params = {"siteId": site_id, "refresh_token": "enabled"}
@@ -490,7 +740,6 @@ def list_site_vlans_v2(site_id: str) -> List[Dict[str, Any]]:
     return []
 
 def _vlan_key(v: Dict[str, Any]) -> Tuple[str, str, str, str]:
-    """Key by (name/display_name lower, tag, interface lower, default_gateway/start_ip)."""
     nm = (v.get("display_name") or v.get("name") or "").strip().lower()
     tg = str(v.get("tag") or "").strip()
     iface = (v.get("interface") or "").strip().lower()
@@ -554,10 +803,10 @@ def main():
             print(f"ERR : {site_name}: dhcp_service=relay requires dhcp_server_ip in sites.csv")
             fail += 1; continue
 
-        # Jinja context must include template_id and relay mode if present
+        # Jinja context
         ctx = dict(r)
         ctx["template_id"] = template_id
-        ctx["dhcp_service_mode"] = svc  # Jinja can use this if you choose
+        ctx["dhcp_service_mode"] = svc
 
         # Render site payload
         try:
@@ -567,47 +816,59 @@ def main():
             print(f"ERR : {site_name}: template render failed: {e}")
             fail += 1; continue
 
-        # Ensure DHCP keys are present if we inferred/declared relay or server
+        # Ensure DHCP keys as needed
         if svc == "relay":
             payload["dhcp_service"] = "relay"
             payload["dhcp_server_ip"] = dhcp_ip
         elif svc == "server":
             payload["dhcp_service"] = "server"
             payload.pop("dhcp_server_ip", None)
-        # inherit/blank → rely on template defaults (send nothing)
 
+        # If dry-run, preview and continue
         if args.dry_run:
-            print(f"DRY: {site_name}: site-payload bytes={len(rendered)} (after inject: {len(json.dumps(payload))})")
             try:
-                if vlans_file:
-                    vlans = load_vlans(vlans_file)
-                    print(f"    VLANs: {len(vlans)} (sample: {[v.get('display_name') or v.get('name') for v in vlans[:3]]})")
+                vlans = load_vlans(vlans_file) if vlans_file else []
             except Exception as e:
+                vlans = []
                 print(f"    VLAN load warn: {e}")
+            wan_preview = _collect_wan_ifaces_from_row(r)
+            lan_preview = _collect_lan_ifaces_from_vlans(vlans, exclude=wan_preview+["mgmt"])
+            link_preview = (r.get("vrrp_link_interface") or "").strip().lower() if (r.get("gateway_name_b") or "").strip() else ""
+            track_preview = ",".join(_unique_preserve([*wan_preview, *lan_preview]))
+            print(f"DRY: {site_name}: site-payload bytes={len(rendered)} (after inject: {len(json.dumps(payload))})")
+            print(f"     VLANs: total={len(vlans)}; WAN-ifaces={wan_preview}; LAN-ifaces={lan_preview}")
+            if link_preview:
+                print(f"     VRRP preview (keys redacted): VRID={str(r.get('vrrp_vrid','16'))}, link='{link_preview}', track='{track_preview}'")
             ok += 1; continue
 
         # 1) Create site (v3)
-        ok_site, msg = create_site(template_id, payload)
+        ok_site, msg, cluster_hint = create_site(template_id, payload)
         if not ok_site:
             print(f"ERR : {site_name}: site create failed: {msg}")
             fail += 1; continue
         print(f"OK  : {site_name}: site create → {msg[:160]}")
 
-        # 2) Resolve gateway ids + cluster (handles standalone vs HA)
-        gateways_str, cluster_id = resolve_gateway_ids_and_cluster(site_name, retries=40, delay=3.0)
+        # 2) Resolve gateway ids + cluster (short poll)
+        gateways_str, cluster_id = resolve_gateway_ids_and_cluster(
+            site_name,
+            prefer_cluster_id=cluster_hint,
+            retries=POLL_RETRIES,
+            delay=POLL_DELAY_S
+        )
         if not gateways_str or not cluster_id:
             print(f"ERR : {site_name}: gateway/cluster not ready (gateways='{gateways_str}', cluster={cluster_id})")
             fail += 1; continue
         if DEBUG:
             print(f"Gateways: {gateways_str}  Cluster: {cluster_id}")
 
-        # 3) Load VLANs & POST each (v2)
+        # 3) Load VLANs
         try:
             vlans = load_vlans(vlans_file) if vlans_file else []
         except Exception as e:
             print(f"ERR : {site_name}: failed to load VLANs from {vlans_file}: {e}")
             fail += 1; continue
 
+        # 4) POST VLANs (v2) — before VRRP so LAN ifaces exist
         per_net_dns = (r.get("per_site_dns") or "").strip()
         vlan_ok = 0; vlan_fail = 0
         for v in vlans:
@@ -618,10 +879,9 @@ def main():
             else:
                 vlan_fail += 1
                 print(f"    VLAN ERR: {m}")
-
         print(f"OK  : {site_name}: VLANs POSTed OK={vlan_ok} ERR={vlan_fail}")
 
-        # 4) Enable + share_over_vpn + (re)apply dhcp_service — requires VLAN ids
+        # 5) Enable + share_over_vpn + (re)apply dhcp_service
         site_row = find_site_row_by_name(site_name) or {}
         ci = site_row.get("cluster_info") or {}
         site_id = ci.get("site_id") or site_row.get("site_id") or site_row.get("id")
@@ -637,7 +897,6 @@ def main():
             hit = id_map.get(k)
             if hit and hit.get("id"):
                 return hit["id"]
-            # Relaxed fallback: try by (name, tag)
             nm = (csv_vlan.get("display_name") or csv_vlan.get("name") or "").strip().lower()
             tg = str(csv_vlan.get("tag") or "").strip()
             for v in current:
@@ -653,13 +912,13 @@ def main():
             "Content-Type": "application/json",
         }
 
-        # a) Enable (status=provisioned) where CSV says enabled=True
+        # a) Enable
         for v in vlans:
             if not v.get("enabled", True):
                 continue
             vid = find_id_for(v)
             if not vid:
-                print(f"    WARN enable: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                if DEBUG: print(f"    WARN enable: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
                 continue
             url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
             payload = {
@@ -668,32 +927,32 @@ def main():
                 "per_network_dns": (per_net_dns or ""),
                 "status": "provisioned",
             }
-            r = put_json(url, payload, headers=v2_hdrs)
-            if r.status_code not in (200,204):
-                print(f"    WARN enable PUT {vid}: {r.status_code} {r.text[:180]}")
+            r_put = put_json(url, payload, headers=v2_hdrs)
+            if r_put.status_code not in (200,204) and DEBUG:
+                print(f"    WARN enable PUT {vid}: {r_put.status_code} {r_put.text[:180]}")
 
-        # b) Patch share_over_vpn where requested TRUE
+        # b) share_over_vpn
         for v in vlans:
             if not v.get("share_over_vpn", False):
                 continue
             vid = find_id_for(v)
             if not vid:
-                print(f"    WARN share_over_vpn: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                if DEBUG: print(f"    WARN share_over_vpn: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
                 continue
             url = f"{API_V2}/Network/share-over-vpn?refresh_token=enabled"
             payload = {"id": vid, "share_over_vpn": True}
-            r = patch_json(url, payload, headers=v2_hdrs)
-            if r.status_code not in (200,204):
-                print(f"    WARN share_over_vpn PATCH {vid}: {r.status_code} {r.text[:180]}")
+            r_patch = patch_json(url, payload, headers=v2_hdrs)
+            if r_patch.status_code not in (200,204) and DEBUG:
+                print(f"    WARN share_over_vpn PATCH {vid}: {r_patch.status_code} {r_patch.text[:180]}")
 
-        # c) (Re)apply dhcp_service if CSV specified something explicit
+        # c) dhcp_service
         for v in vlans:
             desired = norm_dhcp_service(v.get("dhcp_service",""), bool(v.get("dhcp_range")))
             if (v.get("dhcp_service") or "") == "":
-                continue  # CSV blank → already defaulted at POST time
+                continue
             vid = find_id_for(v)
             if not vid:
-                print(f"    WARN dhcp_service: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+                if DEBUG: print(f"    WARN dhcp_service: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
                 continue
             url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
             payload = {
@@ -702,9 +961,33 @@ def main():
                 "per_network_dns": (per_net_dns or ""),
                 "dhcp_service": desired,
             }
-            r = put_json(url, payload, headers=v2_hdrs)
-            if r.status_code not in (200,204):
-                print(f"    WARN dhcp_service PUT {vid}: {r.status_code} {r.text[:180]}")
+            r_put2 = put_json(url, payload, headers=v2_hdrs)
+            if r_put2.status_code not in (200,204) and DEBUG:
+                print(f"    WARN dhcp_service PUT {vid}: {r_put2.status_code} {r_put2.text[:180]}")
+
+        # 6) VRRP (after VLANs) — discover HA link + trackables via GET
+        try:
+            if is_ha_gateways_str(gateways_str):
+                vrid = str(r.get("vrrp_vrid", "16"))
+                vrrp_payload, link_used, track_used = build_vrrp_payload(
+                    cluster_id, gateways_str, r, vlans, site_id=str(site_id), vrid=vrid
+                )
+                if vrrp_payload is None:
+                    print("OK  : standalone: VRRP skipped")
+                else:
+                    headers = _vrrp_headers()
+                    url = _vrrp_url(cluster_id)
+                    okv, textv, codev = post_vrrp(url, headers, vrrp_payload)
+                    if okv:
+                        print(f"OK  : VRRP posted (VRID {vrid}) link='{link_used}' track='{track_used}'")
+                    else:
+                        print(f"WARN: VRRP not applied: HTTP {codev}: {textv[:180]}")
+            else:
+                print("OK  : standalone: VRRP skipped")
+        except SystemExit as e:
+            print(str(e)); fail += 1; continue
+        except Exception as e:
+            print(f"WARN: VRRP step error on site '{site_name}': {e}")
 
         ok += 1
 

@@ -1,1 +1,0 @@
-python3 ztb_login.py && set -a && source .env && set +a

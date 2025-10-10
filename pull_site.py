@@ -3,14 +3,15 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-# version: 1.3.2
+# version: 1.4.0
+#
 # Usage:
 #   python3 pull_site.py                                     # lists sites
 #   python3 pull_site.py --site-name "Utrecht-Branch"
 #   python3 pull_site.py --site-name "Utrecht-Branch" --include-wan
 #   python3 pull_site.py --site-name "Utrecht-Branch" --json-only
 #   python3 pull_site.py --site-name "Utrecht-Branch" --include-ha
-#   python3 pull_site.py --list-templates [--template-search "zt800"]   # NEW: list available templates
+#   python3 pull_site.py --list-templates [--template-search "zt800"]
 #
 # Notes:
 #   - Saves VLAN definitions to vlans/<site>.json and vlans/<site>.csv
@@ -18,18 +19,29 @@
 #   - CSV "enabled" = TRUE iff status == "provisioned"
 #   - By default, WAN VLANs are excluded from the CSV (use --include-wan to include them)
 #   - **HA VLANs:** By default, HA internal VLANs (e.g., zone "HA Zone") are excluded from the CSV
-#                   because they’re auto-provisioned during site creation and not editable;
-#                   use --include-ha to include them if you need to round-trip.
+#                   because they’re auto-provisioned during site creation and not editable.
 #   - Updates or inserts site row into sites.csv for bulk_create.py
 #   - Supports HA by adding optional *_b / wan1_* fields when a second gateway is present
-#   - lan_interface_name removed: VLAN CSV is source of truth for LAN interfaces
-#   - **Templates:** `--list-templates` shows name/deployment_type/platform_type/id.
-#                   `sites.csv` keeps a `template_id` column but we intentionally leave it BLANK;
-#                   at runtime, bulk_create.py should resolve ID from template_name when empty.
+#   - **Templates:** `--list-templates` shows name/deployment_type/platform_type/id. Keep template_id blank;
+#                   bulk_create resolves ID from template_name at runtime.
+#
+#   - **Auth QoL (single-run)**:
+#       · If BEARER is missing, we call `ztb_login.py`, reload .env, and build the session with the new token.
+#       · If any request returns 401 once, we call `ztb_login.py`, update the session header, and retry ONCE.
+#       · Messages are visible (no hidden background behavior).
 
-import os, sys, json, csv, argparse, pathlib
+import os, sys, json, csv, argparse, pathlib, subprocess
 from typing import Any, Dict, List, Optional, Tuple
 import requests
+
+# ------------------------
+# Paths
+# ------------------------
+ROOT = pathlib.Path(__file__).resolve().parent
+OUT_VLANS_DIR = ROOT / "vlans"
+OUT_VLANS_DIR.mkdir(exist_ok=True)
+CSV_PATH = ROOT / "sites.csv"
+LOGIN_SCRIPT = ROOT / "ztb_login.py"
 
 # ------------------------
 # tiny .env loader (no extra deps)
@@ -45,8 +57,8 @@ def load_env_file(path: str = ".env"):
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip().strip('"').strip("'")
-        if k and k not in os.environ:
-            os.environ[k] = v
+        # allow refresh/overwrite after ztb_login.py runs
+        os.environ[k] = v
 
 load_env_file(".env")
 
@@ -54,21 +66,56 @@ load_env_file(".env")
 # Env / session
 # ------------------------
 def _normalize_base_root(raw: str) -> str:
-    """Accept root or /api/v3 form and return clean ROOT (no trailing slash, no /api/*)."""
+    """Accept root or /api/v3|v2 and return clean ROOT (no trailing slash, no /api/*)."""
     base = (raw or "").strip().rstrip("/")
     if base.endswith("/api/v3") or base.endswith("/api/v2"):
         base = base.rsplit("/api/", 1)[0]
     return base
 
+def _invoke_login() -> bool:
+    """Run ztb_login.py and reload .env. Return True if BEARER is now set."""
+    if not LOGIN_SCRIPT.exists():
+        print("ERROR: ztb_login.py not found; cannot auto-fetch token.", file=sys.stderr)
+        return False
+    print("🔐 BEARER missing — invoking ztb_login.py to obtain a fresh token…")
+    try:
+        # visible to user
+        subprocess.run([sys.executable, str(LOGIN_SCRIPT)], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: ztb_login.py failed with exit code {e.returncode}", file=sys.stderr)
+        return False
+    # reload env so we get the new token immediately
+    load_env_file(".env")
+    return bool((os.environ.get("BEARER") or "").strip())
+
+def _refresh_bearer_and_update_session(session: requests.Session) -> bool:
+    """On 401: run login, reload env, update session header."""
+    print("🔄 401 Unauthorized — refreshing token via ztb_login.py and retrying once…")
+    if not _invoke_login():
+        print("ERROR: token refresh failed.", file=sys.stderr)
+        return False
+    new_bearer = (os.environ.get("BEARER") or "").strip()
+    if not new_bearer:
+        print("ERROR: ztb_login.py ran but BEARER is still empty.", file=sys.stderr)
+        return False
+    session.headers["Authorization"] = f"Bearer {new_bearer}"
+    return True
+
 def get_session_and_bases():
     # Prefer ZTB_API_BASE, fallback to legacy ZIA_API_BASE
     base_env = os.environ.get("ZTB_API_BASE") or os.environ.get("ZIA_API_BASE") or ""
-    bearer   = (os.environ.get("BEARER") or "").strip()
     base_root = _normalize_base_root(base_env)
-
-    if not base_root or not bearer:
-        print("ERROR: Missing ZTB_API_BASE (or legacy ZIA_API_BASE) and/or BEARER in environment (check .env).", file=sys.stderr)
+    if not base_root:
+        print("ERROR: Missing ZTB_API_BASE (or legacy ZIA_API_BASE) in environment (.env).", file=sys.stderr)
         sys.exit(1)
+
+    # Ensure a bearer exists BEFORE creating the session header
+    if not (os.environ.get("BEARER") or "").strip():
+        if not _invoke_login():
+            print("ERROR: BEARER still missing after ztb_login.py.", file=sys.stderr)
+            sys.exit(1)
+
+    bearer = (os.environ.get("BEARER") or "").strip()
 
     base_v3 = f"{base_root}/api/v3"
     base_v2 = f"{base_root}/api/v2"
@@ -80,8 +127,7 @@ def get_session_and_bases():
 
     s = requests.Session()
     s.headers.update({
-        # NOTE: .env BEARER is the RAW token; add scheme here
-        "Authorization": f"Bearer {bearer}",
+        "Authorization": f"Bearer {bearer}",  # BEARER here is already ensured/fresh
         "Accept": "application/json",
         "User-Agent": "pull_site.py",
     })
@@ -91,18 +137,17 @@ def get_session_and_bases():
 session, BASE_V3, BASE_V2, ORIGIN, REFERER = get_session_and_bases()
 
 # ------------------------
-# Paths
+# HTTP helpers (with single-run 401 refresh)
 # ------------------------
-ROOT = pathlib.Path(__file__).resolve().parent
-OUT_VLANS_DIR = ROOT / "vlans"
-OUT_VLANS_DIR.mkdir(exist_ok=True)
-CSV_PATH = ROOT / "sites.csv"
+def _request_with_auto_refresh(method: str, url: str, *, params=None, headers=None, timeout=60, json=None, data=None):
+    r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
+    if r.status_code == 401:
+        if _refresh_bearer_and_update_session(session):
+            r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
+    return r
 
-# ------------------------
-# HTTP helpers
-# ------------------------
 def get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Any:
-    r = session.get(url, params=params, headers=headers, timeout=60)
+    r = _request_with_auto_refresh("GET", url, params=params, headers=headers, timeout=60)
     if r.status_code != 200:
         raise RuntimeError(f"GET {url} -> {r.status_code} {r.text[:300]}")
     try:
@@ -111,7 +156,7 @@ def get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optiona
         raise ValueError(f"Non-JSON response from {url}: {r.text[:300]}")
 
 def get_json_v3(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    # Force trailing slash like many UI calls (Gateway/ vs Gateway)
+    # Many v3 endpoints prefer the trailing slash (Gateway/ vs Gateway)
     p = path.lstrip("/")
     if not p.endswith("/"):
         p += "/"
@@ -136,9 +181,7 @@ def get_json_v3_no_trailing(path: str, params: Optional[Dict[str, Any]] = None) 
 
 def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
     """
-    Tenant exposes VLANs via /api/v2/Network/?siteId=...
-    We mirror the browser Origin/Referer.
-    Returns a list of vlan dicts.
+    VLANs via /api/v2/Network/?siteId=...
     """
     url = f"{BASE_V2}/Network/"
     params = {"siteId": site_id, "refresh_token": "enabled"}
@@ -151,9 +194,7 @@ def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
     # Normalize: {result:{rows:[...]}} OR {rows:[...]} OR [...]
     if isinstance(data, dict):
         rows = data.get("rows") or data.get("result", {}).get("rows")
-        if isinstance(rows, list):
-            return rows
-        return []
+        return rows or []
     if isinstance(data, list):
         return data
     return []
@@ -162,7 +203,6 @@ def get_vlans_v2_network(site_id: str) -> List[Dict[str, Any]]:
 # Data access
 # ------------------------
 def list_gateways_rows() -> List[Dict[str, Any]]:
-    # Capital 'G' required; trailing slash + UI-ish headers sent by get_json_v3
     data = get_json_v3("Gateway", params={
         "gateway_type": "isolation",
         "sortdir": "asc",
@@ -190,7 +230,6 @@ def fetch_templates(search: str = "") -> List[Dict[str, Any]]:
         "refresh_token": "enabled",
     }
     data = get_json_v3_no_trailing("templates", params=params)
-    # Normalize: {result:[...]} OR {rows:[...]} OR [...]
     if isinstance(data, dict):
         if isinstance(data.get("result"), list):
             return data["result"]
@@ -243,7 +282,6 @@ VLAN_CSV_FIELDS = [
 ]
 
 def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
-    # Prefer range_list [[a,b]] then dhcp_range "a-b"
     r = d.get("range_list")
     if isinstance(r, list) and r and isinstance(r[0], list) and len(r[0]) == 2:
         a, b = r[0][0] or "", r[0][1] or ""
@@ -255,13 +293,6 @@ def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
     return ("", "")
 
 def _map_dhcp_service_for_csv(raw: Optional[str]) -> str:
-    """
-    Convert API value -> CSV display value.
-      inherit       -> on
-      no_dhcp       -> off
-      non-airgapped -> non-airgapped
-      (None/other)  -> ""
-    """
     if not raw:
         return ""
     raw = str(raw).strip().lower()
@@ -282,7 +313,6 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         iface  = (v.get("interface") or "").strip()
         zone   = (v.get("zone") or "").strip()
 
-        # default_gateway preferred; fall back to start_ip/range first address if missing
         gw = (v.get("default_gateway") or "").strip()
         if not gw:
             gw = (v.get("start_ip") or "").strip()
@@ -291,11 +321,8 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                 gw = a
 
         dhcp_start, dhcp_end = _split_range(v)
-
-        # Enabled reflects UI "toggle" -> status == "provisioned"
         status = (v.get("status") or "").strip().lower()
         enabled = "TRUE" if status == "provisioned" else "FALSE"
-
         share_over_vpn = "TRUE" if bool(v.get("share_over_vpn", False)) else "FALSE"
         dhcp_service_disp = _map_dhcp_service_for_csv(v.get("dhcp_service"))
 
@@ -361,7 +388,6 @@ def upsert_sites_csv_row(row: Dict[str, str]):
 # helpers
 # ------------------------
 def is_wan_vlan(v: Dict[str, Any]) -> bool:
-    """Heuristic to identify WAN VLANs: prefer zone label; fall back to name hint."""
     zone = (v.get("zone") or "").strip().lower()
     if zone.startswith("wan"):
         return True
@@ -371,13 +397,6 @@ def is_wan_vlan(v: Dict[str, Any]) -> bool:
     return False
 
 def is_ha_internal_vlan(v: Dict[str, Any]) -> bool:
-    """
-    Identify the HA internal VLAN that templates auto-create and the UI locks down.
-    Primary signal: zone labeled 'HA Zone' (case-insensitive).
-    Secondary (loose) signals kept in case some tenants don't set zone:
-      - name starts with 'ha-' AND tag == '1'
-    We are conservative: prefer the zone check.
-    """
     zone = (v.get("zone") or "").strip().lower()
     if zone.startswith("ha"):
         return True
@@ -398,7 +417,6 @@ def main():
     ap.add_argument("--json-only", action="store_true", help="Skip writing VLAN CSV")
     ap.add_argument("--include-wan", action="store_true", help="Include WAN VLANs in the CSV (default: excluded)")
     ap.add_argument("--include-ha", action="store_true", help="Include HA internal VLAN(s) in the CSV (default: excluded)")
-    # NEW: templates listing
     ap.add_argument("--list-templates", action="store_true", help="List templates (name, deployment_type, platform_type, id)")
     ap.add_argument("--template-search", default="", help="Optional name filter for --list-templates (uses API 'search' param)")
     args = ap.parse_args()
