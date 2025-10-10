@@ -138,19 +138,20 @@ Flag	Description
 
 Creates:
 	•	sites.csv → one row for your reference site
-	•	vlans_<sitename>.csv → VLAN configuration
+	•	<site name>.csv → VLAN configuration in vlans directory
 
 ⸻
 
 2️⃣ Prepare sites.csv
 
-Duplicate the generated sites.csv and create additional rows for each site you want to deploy.
+Edit the generated sites.csv and create additional rows for each site you want to deploy.
 
 site_name,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan0_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,per_site_dns,vlans_file,post
 Amsterdam,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8",vlans_amsterdam.csv,1
 
 	•	post=1 marks which rows to deploy.
 	•	Use template_name (preferred) or template_id.
+	•	template_id is automatically resolved if you provide template name (you can leave this cell blank).
 	•	DHCP relay IPs must be defined when required by the template.
 
 ⸻
