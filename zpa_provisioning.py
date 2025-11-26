@@ -281,32 +281,6 @@ def create_provisioning_key(base_url: str, customer_id: str, token: str, name: s
         if hasattr(e, 'response') and e.response:
              print(f"   Response: {e.response.text}", file=sys.stderr)
         return ""
-        return ""
-    
-    # 3. Create the provisioning key
-    url = f"{base_url}/mgmtconfig/v1/admin/customers/{customer_id}/associationType/CONNECTOR/provisioningKey"
-    headers = get_zpa_headers(token)
-    
-    payload = {
-        "associationType": "CONNECTOR",
-        "name": name,
-        "maxUsage": max_usage,
-        "enrollmentCertId": enrollment_cert_id,
-        "zcomponentId": app_connector_group_id
-    }
-    
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        prov_key = resp.json().get("provisioningKey", "")
-        if prov_key:
-            print(f"   ✅ Created provisioning key with App Connector Group")
-        return prov_key
-    except Exception as e:
-        print(f"❌ Failed to create ZPA Provisioning Key: {e}", file=sys.stderr)
-        if hasattr(e, 'response') and e.response:
-             print(f"   Response: {e.response.text}", file=sys.stderr)
-        return ""
 
 def update_ztb_site_zpa(ztb_session: requests.Session, ztb_api_base: str, cluster_id: int, name: str, provisioning_key: str, dry_run: bool = False) -> bool:
     """
