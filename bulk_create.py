@@ -29,6 +29,8 @@ import os, sys, csv, json, time, ipaddress, argparse, pathlib, subprocess, re
 from typing import Any, Dict, List, Tuple, Optional, Iterable, Set
 import requests
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+import zpa_provisioning
+import ztb_login
 
 # ------------------------
 # tiny .env loader (OVERWRITES existing env vars)
@@ -39,7 +41,10 @@ def load_env_file(path: str = ".env"):
         return
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        # Remove inline comments
+        if "#" in line:
+            line = line.split("#", 1)[0].strip()
+        if not line or "=" not in line:
             continue
         k, v = line.split("=", 1)
         k = k.strip()
@@ -174,8 +179,8 @@ def post_raw(url: str, data: str, headers: Optional[Dict[str, str]] = None, time
 def post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
     return post_raw(url, json.dumps(payload), headers=headers, timeout=90)
 
-def put_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> requests.Response:
-    r = _request_with_auto_refresh("PUT", url, headers=headers, timeout=90, data=json.dumps(payload))
+def put_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, str]] = None) -> requests.Response:
+    r = _request_with_auto_refresh("PUT", url, params=params, headers=headers, timeout=90, data=json.dumps(payload))
     _d("PUT", url, r.status_code)
     return r
 
@@ -708,6 +713,7 @@ def vlan_to_v2_payload(vlan: Dict[str, Any], gateways_str: str, cluster_id: int,
         "event_type": "addnetwork",
         "dhcp_service": norm_dhcp_service(vlan.get("dhcp_service",""), bool(vlan.get("dhcp_range"))),
         "share_over_vpn": bool(vlan.get("share_over_vpn", False)),
+        "enabled": bool(vlan.get("enabled", True)),
     }
 
 def post_vlan(vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
@@ -746,6 +752,202 @@ def _vlan_key(v: Dict[str, Any]) -> Tuple[str, str, str, str]:
     gw = (v.get("default_gateway") or v.get("start_ip") or "").strip()
     return (nm, tg, iface, gw)
 
+def configure_private_dns(session: requests.Session, api_v2: str, site_id: str, private_dns_ips: str, dry_run: bool = False) -> bool:
+    """
+    Configures Private DNS for the site by adding IPs to the 'System-Private-DNS-Servers-Group'.
+    PUT /api/v2/group-membership?site_id=...&group_name=...
+    """
+    if not private_dns_ips:
+        return True
+
+    # Parse IPs, ensuring /32 CIDR
+    ips = []
+    for ip in private_dns_ips.split(","):
+        ip = ip.strip()
+        if not ip: continue
+        if "/" not in ip:
+            ip = f"{ip}/32"
+        ips.append(ip)
+    
+    if not ips:
+        return True
+
+    if dry_run:
+        print(f"   [DRY-RUN] Would configure Private DNS for site {site_id}: {ips}")
+        return True
+
+    # Use the exact pattern from the screenshot:
+    # PUT /api/v2/group-membership?site_id=...&group_name=System-Private-DNS-Servers-Group&refresh_token=enabled
+    # Payload: { "member_attributes": { "ip_prefix": [...] } }
+    
+    url = f"{api_v2}/group-membership"
+    params = {
+        "site_id": site_id,
+        "group_name": "System-Private-DNS-Servers-Group",
+        "refresh_token": "enabled"
+    }
+    
+    payload = {
+        "member_attributes": {
+            "ip_prefix": ips
+        }
+    }
+
+    try:
+        # We updated put_json to accept params
+        r = put_json(url, payload, headers={"Accept": "application/json", "Content-Type": "application/json"}, params=params)
+        if r.status_code in (200, 201, 204):
+            print(f"   ✅ Configured Private DNS: {ips}")
+            return True
+        else:
+            print(f"   ❌ Failed to configure Private DNS: {r.status_code} {r.text[:200]}")
+            return False
+    except Exception as e:
+        print(f"   ❌ Error configuring Private DNS: {e}")
+        return False
+
+def process_vlans_for_site(session: requests.Session, api_v2: str, site_id: str, gw_ids: str, cluster_id: int, vlans_file: str, row: Dict[str, str], dry_run: bool = False):
+    if not vlans_file or not os.path.exists(vlans_file):
+        return
+
+    try:
+        vlans = load_vlans(vlans_file)
+    except Exception as e:
+        print(f"   ⚠️  Failed to load VLANs from {vlans_file}: {e}")
+        return
+
+    print(f"   Processing {len(vlans)} VLANs from {os.path.basename(vlans_file)}...")
+    
+    # Use wan_dns as default for per_network_dns if not specified
+    per_net_dns = (row.get("wan_dns") or "").strip()
+
+    vlan_ok = 0; vlan_fail = 0
+    for v in vlans:
+        v2_payload = vlan_to_v2_payload(v, gw_ids, cluster_id, per_network_dns=per_net_dns)
+        
+        if dry_run:
+             print(f"   [DRY-RUN] Would POST VLAN {v.get('name')} tag={v.get('tag')}")
+             vlan_ok += 1
+             continue
+
+        okv, m = post_vlan(v2_payload)
+        if okv:
+            vlan_ok += 1
+        else:
+            vlan_fail += 1
+            print(f"    ❌ VLAN ERR: {m}")
+    
+    print(f"   ✅ VLANs processed: OK={vlan_ok} ERR={vlan_fail}")
+
+    # Post-processing: Enable and Share Over VPN (Restored from original logic)
+    if dry_run:
+        return
+
+    current = list_site_vlans_v2(str(site_id))
+    id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {_vlan_key(v): v for v in current}
+
+    def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
+        k = _vlan_key(csv_vlan)
+        hit = id_map.get(k)
+        if hit and hit.get("id"):
+            return hit["id"]
+        nm = (csv_vlan.get("display_name") or csv_vlan.get("name") or "").strip().lower()
+        tg = str(csv_vlan.get("tag") or "").strip()
+        for v in current:
+            if (v.get("display_name") or v.get("name") or "").strip().lower() == nm and str(v.get("tag") or "") == tg:
+                if v.get("id"):
+                    return v["id"]
+        return None
+
+    v2_hdrs = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+        "Content-Type": "application/json",
+    }
+
+    # a) Enable (PUT status="provisioned")
+    for v in vlans:
+        if not v.get("enabled", True):
+            continue
+        vid = find_id_for(v)
+        if not vid:
+            print(f"    ⚠️  WARN enable: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+            continue
+        
+        # Only update if needed? The original code just did it.
+        url = f"{api_v2}/Network/update/{vid}?refresh_token=enabled"
+        payload = {
+            "name": v.get("display_name") or v.get("name") or "",
+            "subnet": str(v.get("subnet") or ""),
+            "per_network_dns": (per_net_dns or ""),
+            "status": "provisioned",
+        }
+        try:
+            r_put = put_json(url, payload, headers=v2_hdrs)
+            if r_put.status_code not in (200, 204):
+                print(f"    ⚠️  WARN enable PUT {vid}: {r_put.status_code} {r_put.text[:180]}")
+            else:
+                # print(f"    ✅ Enabled VLAN {v.get('name')}") # Optional: reduce noise
+                pass
+        except Exception as e:
+            print(f"    ⚠️  Error enabling VLAN {vid}: {e}")
+
+    # b) share_over_vpn (PATCH)
+    for v in vlans:
+        if not v.get("share_over_vpn", False):
+            continue
+        vid = find_id_for(v)
+        if not vid:
+            print(f"    ⚠️  WARN share_over_vpn: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
+            continue
+        
+        url = f"{api_v2}/Network/share-over-vpn?refresh_token=enabled"
+        payload = {"id": vid, "share_over_vpn": True}
+        try:
+            r_patch = patch_json(url, payload, headers=v2_hdrs)
+            if r_patch.status_code not in (200, 204):
+                print(f"    ⚠️  WARN share_over_vpn PATCH {vid}: {r_patch.status_code} {r_patch.text[:180]}")
+            else:
+                # print(f"    ✅ Shared VLAN {v.get('name')} over VPN")
+                pass
+        except Exception as e:
+            print(f"    ⚠️  Error sharing VLAN {vid}: {e}")
+
+def configure_vrrp(session: requests.Session, api_v2: str, gw_ids: str, cluster_id: int, vlans_file: str, row: Dict[str, str], site_id: str, dry_run: bool = False):
+    # 1. Load VLANs (needed for track interface discovery)
+    try:
+        vlans = load_vlans(vlans_file) if vlans_file else []
+    except:
+        vlans = []
+    
+    # 2. Build payload
+    try:
+        payload, link_used, track_val = build_vrrp_payload(
+            cluster_id, gw_ids, row, vlans, site_id=site_id, vrid=row.get("vrrp_vrid", "16")
+        )
+    except SystemExit as e:
+        print(f"   ❌ VRRP Config Failed: {e}")
+        return
+
+    if not payload:
+        # Not an error, just means standalone or no HA link found/needed
+        return
+
+    if dry_run:
+        print(f"   [DRY-RUN] Would POST VRRP config for cluster {cluster_id}")
+        print(f"             Link: {link_used}, Track: {track_val}")
+        return
+
+    url = _vrrp_url(cluster_id)
+    headers = _vrrp_headers()
+    
+    ok, msg, code = post_vrrp(url, headers, payload)
+    if ok:
+         print(f"   ✅ VRRP Configured (Link={link_used}, Track={track_val})")
+    else:
+         print(f"   ❌ VRRP Failed: {code} {msg}")
+
 # -------- main --------
 def main():
     global DEBUG
@@ -767,6 +969,11 @@ def main():
 
     print(f"Posting {len(todo)} site(s)…\n")
     ok = 0; fail = 0
+
+    # Initialize session
+    # session is already global and initialized at top level
+    if not session:
+        print("Failed to login to ZTB", file=sys.stderr); sys.exit(1)
 
     for r in todo:
         site_name   = (r.get("site_name") or "").strip()
@@ -839,9 +1046,16 @@ def main():
             print(f"     VLANs: total={len(vlans)}; WAN-ifaces={wan_preview}; LAN-ifaces={lan_preview}")
             if link_preview:
                 print(f"     VRRP preview (keys redacted): VRID={str(r.get('vrrp_vrid','16'))}, link='{link_preview}', track='{track_preview}'")
+            
+            # 7) ZPA Provisioning (Dry Run)
+            if str(r.get("appc_provision", "")).lower() in ("1", "true", "yes"):
+                 base_root = API_V3.split("/api/v3")[0]
+                 zpa_provisioning.provision_zpa_for_site(r, session, base_root, cluster_id=99999, dry_run=True)
+
             ok += 1; continue
 
         # 1) Create site (v3)
+        # FIX: Use 'payload' (rendered JSON) instead of 'r' (raw CSV row) to avoid 400 "Gateway details required"
         ok_site, msg, cluster_hint = create_site(template_id, payload)
         if not ok_site:
             print(f"ERR : {site_name}: site create failed: {msg}")
@@ -862,136 +1076,60 @@ def main():
             print(f"Gateways: {gateways_str}  Cluster: {cluster_id}")
 
         # 3) Load VLANs
-        try:
-            vlans = load_vlans(vlans_file) if vlans_file else []
-        except Exception as e:
-            print(f"ERR : {site_name}: failed to load VLANs from {vlans_file}: {e}")
-            fail += 1; continue
+        # We just check existence here, actual loading is in process_vlans_for_site
+        if vlans_file and not os.path.exists(vlans_file):
+             print(f"   ⚠️  VLANs file not found: {vlans_file}")
 
-        # 4) POST VLANs (v2) — before VRRP so LAN ifaces exist
-        per_net_dns = (r.get("per_site_dns") or "").strip()
-        vlan_ok = 0; vlan_fail = 0
-        for v in vlans:
-            v2_payload = vlan_to_v2_payload(v, gateways_str, cluster_id, per_network_dns=per_net_dns)
-            okv, m = post_vlan(v2_payload)
-            if okv:
-                vlan_ok += 1
+        # 4) Configure Private DNS (New Step)
+        private_dns = r.get("private_dns", "")
+        if private_dns:
+            # Retry lookup for site_id if not already found
+            site_id = None
+            # Increase retries to match polling duration
+            for i in range(10):
+                existing = find_site_row_by_name(site_name)
+                if existing:
+                    # Try multiple fields for site_id, similar to pull_site.py
+                    ci = existing.get("cluster_info") or {}
+                    site_id = ci.get("site_id") or existing.get("site_id") or existing.get("id")
+                    if site_id:
+                        break
+                if i < 9: time.sleep(2)
+
+            if site_id:
+                configure_private_dns(session, API_V2, site_id, private_dns, dry_run=args.dry_run)
             else:
-                vlan_fail += 1
-                print(f"    VLAN ERR: {m}")
-        print(f"OK  : {site_name}: VLANs POSTed OK={vlan_ok} ERR={vlan_fail}")
+                print(f"   ⚠️  Could not find site ID for Private DNS config (checked 10x)")
+                if existing:
+                    print(f"       DEBUG: Found row keys: {list(existing.keys())}")
 
-        # 5) Enable + share_over_vpn + (re)apply dhcp_service
-        site_row = find_site_row_by_name(site_name) or {}
-        ci = site_row.get("cluster_info") or {}
-        site_id = ci.get("site_id") or site_row.get("site_id") or site_row.get("id")
-        if not site_id:
-            print(f"ERR : {site_name}: cannot resolve site_id for post-patch actions")
-            fail += 1; continue
-
-        current = list_site_vlans_v2(str(site_id))
-        id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {_vlan_key(v): v for v in current}
-
-        def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
-            k = _vlan_key(csv_vlan)
-            hit = id_map.get(k)
-            if hit and hit.get("id"):
-                return hit["id"]
-            nm = (csv_vlan.get("display_name") or csv_vlan.get("name") or "").strip().lower()
-            tg = str(csv_vlan.get("tag") or "").strip()
-            for v in current:
-                if (v.get("display_name") or v.get("name") or "").strip().lower() == nm and str(v.get("tag") or "") == tg:
-                    if v.get("id"):
-                        return v["id"]
-            return None
-
-        v2_hdrs = {
-            "Accept": "application/json, text/plain, */*",
-            "Origin": ORIGIN,
-            "Referer": REFERER,
-            "Content-Type": "application/json",
-        }
-
-        # a) Enable
-        for v in vlans:
-            if not v.get("enabled", True):
-                continue
-            vid = find_id_for(v)
-            if not vid:
-                if DEBUG: print(f"    WARN enable: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
-                continue
-            url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
-            payload = {
-                "name": v.get("display_name") or v.get("name") or "",
-                "subnet": str(v.get("subnet") or ""),
-                "per_network_dns": (per_net_dns or ""),
-                "status": "provisioned",
-            }
-            r_put = put_json(url, payload, headers=v2_hdrs)
-            if r_put.status_code not in (200,204) and DEBUG:
-                print(f"    WARN enable PUT {vid}: {r_put.status_code} {r_put.text[:180]}")
-
-        # b) share_over_vpn
-        for v in vlans:
-            if not v.get("share_over_vpn", False):
-                continue
-            vid = find_id_for(v)
-            if not vid:
-                if DEBUG: print(f"    WARN share_over_vpn: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
-                continue
-            url = f"{API_V2}/Network/share-over-vpn?refresh_token=enabled"
-            payload = {"id": vid, "share_over_vpn": True}
-            r_patch = patch_json(url, payload, headers=v2_hdrs)
-            if r_patch.status_code not in (200,204) and DEBUG:
-                print(f"    WARN share_over_vpn PATCH {vid}: {r_patch.status_code} {r_patch.text[:180]}")
-
-        # c) dhcp_service
-        for v in vlans:
-            desired = norm_dhcp_service(v.get("dhcp_service",""), bool(v.get("dhcp_range")))
-            if (v.get("dhcp_service") or "") == "":
-                continue
-            vid = find_id_for(v)
-            if not vid:
-                if DEBUG: print(f"    WARN dhcp_service: could not match VLAN id for {v.get('name')}/{v.get('tag')}")
-                continue
-            url = f"{API_V2}/Network/update/{vid}?refresh_token=enabled"
-            payload = {
-                "name": v.get("display_name") or v.get("name") or "",
-                "subnet": str(v.get("subnet") or ""),
-                "per_network_dns": (per_net_dns or ""),
-                "dhcp_service": desired,
-            }
-            r_put2 = put_json(url, payload, headers=v2_hdrs)
-            if r_put2.status_code not in (200,204) and DEBUG:
-                print(f"    WARN dhcp_service PUT {vid}: {r_put2.status_code} {r_put2.text[:180]}")
-
-        # 6) VRRP (after VLANs) — discover HA link + trackables via GET
-        try:
-            if is_ha_gateways_str(gateways_str):
-                vrid = str(r.get("vrrp_vrid", "16"))
-                vrrp_payload, link_used, track_used = build_vrrp_payload(
-                    cluster_id, gateways_str, r, vlans, site_id=str(site_id), vrid=vrid
-                )
-                if vrrp_payload is None:
-                    print("OK  : standalone: VRRP skipped")
-                else:
-                    headers = _vrrp_headers()
-                    url = _vrrp_url(cluster_id)
-                    okv, textv, codev = post_vrrp(url, headers, vrrp_payload)
-                    if okv:
-                        print(f"OK  : VRRP posted (VRID {vrid}) link='{link_used}' track='{track_used}'")
-                    else:
-                        print(f"WARN: VRRP not applied: HTTP {codev}: {textv[:180]}")
+        # 5) VLANs
+        if vlans_file and os.path.exists(vlans_file):
+            # We need site_id for process_vlans_for_site?
+            # process_vlans_for_site signature: (session, api_v2, site_id, gw_ids, cluster_id, vlans_file, row, dry_run)
+            # We need site_id.
+            if not locals().get("site_id"):
+                 existing = find_site_row_by_name(site_name)
+                 site_id = existing.get("id") if existing else None
+            
+            if site_id:
+                process_vlans_for_site(session, API_V2, site_id, gateways_str, cluster_id, vlans_file, r, dry_run=args.dry_run)
             else:
-                print("OK  : standalone: VRRP skipped")
-        except SystemExit as e:
-            print(str(e)); fail += 1; continue
-        except Exception as e:
-            print(f"WARN: VRRP step error on site '{site_name}': {e}")
+                print(f"   ⚠️  Skipping VLANs: site_id not found")
 
-        ok += 1
+        # 6) VRRP
+        if len(gateways_str.split(",")) > 1:
+            if not locals().get("site_id"):
+                 existing = find_site_row_by_name(site_name)
+                 site_id = existing.get("id") if existing else None
+            configure_vrrp(session, API_V2, gateways_str, cluster_id, vlans_file, r, site_id, dry_run=args.dry_run)
 
-    print(f"\nDone. OK={ok}  ERR={fail}")
+        # 7) ZPA Provisioning
+        if str(r.get("appc_provision", "")).lower() in ("1", "true", "yes"):
+             base_root = API_V3.split("/api/v3")[0]
+             zpa_provisioning.provision_zpa_for_site(r, session, base_root, cluster_id=cluster_id, dry_run=args.dry_run)
+
+    print("\nDone.")
 
 if __name__ == "__main__":
     main()

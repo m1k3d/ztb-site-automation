@@ -21,6 +21,8 @@ It mirrors the same behavior and API calls used by the ZTB UI, but at **scale**.
 - **Template resolution** (by name → ID) for dynamic site creation.  
 - **Post-provision actions**: VLAN enablement, share-over-VPN, DHCP service patching.  
 - **VRRP auto-configuration** — dynamically identifies HA, WAN, and LAN interfaces.  
+- **Private DNS Configuration** — automatically adds sites to "System-Private-DNS-Servers-Group".
+- **ZPA Provisioning** — automatically creates App Connector Groups and Provisioning Keys.
 - **Dry-run and Debug** modes for safe validation.  
 
 ---
@@ -98,8 +100,10 @@ Before you create your reference site, make sure the necessary zones exist.
 # 🔐 Environment Setup (.env)
 
 ZTB_API_BASE="https://<tenant>-api.goairgap.com/api/v3"
-BEARER="auto filled by ztb_login.py"
 API_KEY="CREATE IN UI"
+BEARER="AUTO_POPULATED"
+
+# See ZPA_PROVISIONING_README.md for ZPA-specific variables
 
 💡 Note:
 The BEARER value is automatically generated and updated by ztb_login.py when you first run any script.
@@ -146,8 +150,8 @@ Creates:
 
 Edit the generated sites.csv and create additional rows for each site you want to deploy.
 
-site_name,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan0_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,per_site_dns,vlans_file,post
-Amsterdam,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8",vlans_amsterdam.csv,1
+site_name,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan0_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,wan_dns,private_dns,vlans_file,post,appc_provision
+Amsterdam,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8","10.0.0.5,10.0.0.6",vlans_amsterdam.csv,1,1
 
 	•	post=1 marks which rows to deploy.
 	•	Use template_name (preferred) or template_id.
@@ -237,9 +241,6 @@ vlan_.csv	VLAN definitions per site
 ⸻
 
 🏁 Example Commands Recap
-
-# Authenticate and export token
-python3 ztb_login.py && set -a && source .env && set +a
 
 # Pull a reference site
 python3 pull_site.py --site-name "Branch-Reference" --include-wans

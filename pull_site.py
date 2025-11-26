@@ -351,11 +351,14 @@ def write_vlans_csv(vlans: List[Dict[str, Any]], path: pathlib.Path):
 # ------------------------
 # sites.csv helpers (HA columns supported, no LAN column)
 # ------------------------
+# ------------------------
+# sites.csv helpers (HA columns supported, no LAN column)
+# ------------------------
 CSV_HEADER = (
     "site_name,gateway_name,gateway_name_b,city,country,"
     "wan0_ip,wan0_mask,wan0_gw,wan1_ip,wan1_mask,wan1_gw,"
-    "template_name,template_id,per_site_dns,dhcp_server_ip,zia_location_name,"
-    "wan_interface_name,wan1_interface_name,vlans_file,post\n"
+    "template_name,template_id,wan_dns,private_dns,dhcp_server_ip,zia_location_name,"
+    "wan_interface_name,wan1_interface_name,vlans_file,post,appc_provision\n"
 )
 
 def ensure_sites_csv_header():
@@ -405,6 +408,38 @@ def is_ha_internal_vlan(v: Dict[str, Any]) -> bool:
     if name.startswith("ha-") and tag == "1":
         return True
     return False
+
+def get_private_dns_members(site_id: str) -> str:
+    """
+    Fetch Private DNS members for the site from System-Private-DNS-Servers-Group.
+    Returns comma-separated list of IPs (without /32).
+    """
+    url = f"{BASE_V2}/group-membership"
+    params = {
+        "site_id": site_id,
+        "group_name": "System-Private-DNS-Servers-Group",
+        "refresh_token": "enabled"
+    }
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": ORIGIN,
+        "Referer": REFERER,
+    }
+    
+    try:
+        data = get_json(url, params=params, headers=headers)
+        # Response structure: {"member_attributes": {"ip_prefix": ["1.2.3.4/32", ...]}}
+        if isinstance(data, dict):
+            attrs = data.get("member_attributes", {})
+            prefixes = attrs.get("ip_prefix", [])
+            if isinstance(prefixes, list):
+                # Strip /32 for CSV readability
+                ips = [p.split("/")[0] for p in prefixes if isinstance(p, str)]
+                return ",".join(ips)
+    except Exception as e:
+        print(f"WARN: Failed to fetch Private DNS members: {e}", file=sys.stderr)
+    
+    return ""
 
 # ------------------------
 # Main
@@ -490,6 +525,9 @@ def main():
     wan1_gw   = gw_b.get("default_gw_ip", "")
     wan1_if   = gw_b.get("wan_interface", "")
 
+    # Fetch Private DNS
+    private_dns_ips = get_private_dns_members(str(site_id))
+
     # sites.csv row (defaults you can edit before bulk_create) — leave template_id BLANK on purpose
     csv_row = {
         "site_name":           args.site_name,
@@ -508,7 +546,8 @@ def main():
 
         "template_name":       row.get("template_name","") or ci.get("template_name",""),
         "template_id":         "",  # intentionally blank; resolve by name at runtime in bulk_create.py
-        "per_site_dns":        ci.get("per_site_dns","") or row.get("per_site_dns",""),
+        "wan_dns":             ci.get("per_site_dns","") or row.get("per_site_dns",""),
+        "private_dns":         private_dns_ips,
         "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
         "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or args.site_name,
 
@@ -517,6 +556,7 @@ def main():
 
         "vlans_file":          (OUT_VLANS_DIR / f"{args.site_name}.csv").as_posix(),
         "post":                "0",
+        "appc_provision":      "0",
     }
 
     upsert_sites_csv_row(csv_row)
