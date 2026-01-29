@@ -10,11 +10,16 @@
   {% endif %}
 
   "location": {
+    {% if existing_location_id %}
+    "is_existing_location": true,
+    "location_id": {{ existing_location_id }}
+    {% else %}
     "is_existing_location": false,
     "details": {
       "country": "{{ country | upper | replace(' ', '_') | replace('-', '_') }}",
-      "name": "{{ site_name }}"
+      "name": "{{ zia_location_name or site_name }}"
     }
+    {% endif %}
   },
 
   "private_dns": "{{ wan_dns }}",

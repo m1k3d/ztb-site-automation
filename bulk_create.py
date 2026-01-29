@@ -271,6 +271,54 @@ def ensure_template_id_for_row(row: Dict[str, str]) -> Tuple[bool, Optional[str]
     names_hint = ", ".join(sorted({it.get("name","") for it in all_items if it.get("name")}))
     return False, None, f"could not resolve template_id from template_name='{tname}'. Available names: {names_hint}"
 
+# --- ZIA Locations list (for name→id resolution) ---
+def get_json_v3_locations() -> List[Dict[str, Any]]:
+    # GET /api/v3/settings/locations?no_cache=true&refresh_token=enabled
+    # Use the same endpoint we added to pull_site.py
+    params = {
+        "no_cache": "true",
+        "refresh_token": "enabled",
+    }
+    # Note: get_json_v3_templates is just a wrapper around get_json. We can reuse helpers or just call get_json directly.
+    # We'll use get_json with base_v3 logic manually or add a helper if we had one.
+    # But wait, we have API_V3 global.
+    url = f"{API_V3}/settings/locations"
+    headers = _v3_headers()
+    try:
+        data = get_json(url, params=params, headers=headers)
+    except RuntimeError:
+        # Retry with trailing slash just in case, though screenshot didn't show it needed.
+        data = get_json(url + "/", params=params, headers=headers)
+    
+    if isinstance(data, dict):
+        return data.get("locations", [])
+    return []
+
+class LocationResolver:
+    def __init__(self):
+        self._by_lower_name: Dict[str, int] = {}
+        self._loaded = False
+    
+    def _load(self):
+        if self._loaded:
+            return
+        locs = get_json_v3_locations()
+        for l in locs:
+            nm = str(l.get("name") or "").strip()
+            lid = l.get("id")
+            if nm and lid:
+                self._by_lower_name[nm.lower()] = int(lid)
+        self._loaded = True
+        if DEBUG:
+            print(f"Loaded {len(self._by_lower_name)} ZIA locations")
+
+    def resolve(self, name: str) -> Optional[int]:
+        if not name: return None
+        self._load()
+        return self._by_lower_name.get(name.strip().lower())
+
+ZIA_LOCATIONS = LocationResolver()
+
 # -------- value normalization --------
 def _clean_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1","true","yes","y")
@@ -1012,8 +1060,26 @@ def main():
 
         # Jinja context
         ctx = dict(r)
+        
+        # Resolve ZIA Location (if zia_location_name exists, try to find its ID)
+        zname = (r.get("zia_location_name") or "").strip()
+        existing_loc_id = None
+        if zname:
+            # We have a name, check if it exists in ZIA
+            existing_loc_id = ZIA_LOCATIONS.resolve(zname)
+            if existing_loc_id and DEBUG:
+                print(f"  Mapping zia_location_name='{zname}' -> existing_location_id={existing_loc_id}")
+                print(f"  INFO: Will use existing ZIA Location ID {existing_loc_id} ({zname})")
+            elif existing_loc_id:
+                # Always show this info even if not debug, since it changes behavior significantly
+                print(f"  INFO: Using existing ZIA Location ID {existing_loc_id} for '{zname}'")
+            elif zname and not existing_loc_id:
+                print(f"  WARN: zia_location_name='{zname}' not found in ZIA, will create NEW location.")
+
         ctx["template_id"] = template_id
         ctx["dhcp_service_mode"] = svc
+        if existing_loc_id:
+            ctx["existing_location_id"] = existing_loc_id
 
         # Render site payload
         try:

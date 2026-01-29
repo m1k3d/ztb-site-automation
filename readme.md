@@ -138,6 +138,7 @@ Flag	Description
 --site-name	Site name to pull from API
 --include-wans	Include WAN interface info in output
 --list-templates	(Optional) List all available templates
+--list-locations    (Optional) List all ZIA locations and IDs
 --debug	Verbose API output
 
 Creates:
@@ -157,6 +158,7 @@ Amsterdam,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.
 	•	Use template_name (preferred) or template_id.
 	•	template_id is automatically resolved if you provide template name (you can leave this cell blank).
 	•	DHCP relay IPs must be defined when required by the template.
+	•	zia_location_name allows reusing an existing ZIA location. If set, the script resolves its ID and links it. If blank or new name, a new location is created/derived.
 
 ⸻
 
@@ -244,6 +246,9 @@ vlan_.csv	VLAN definitions per site
 
 # Pull a reference site
 python3 pull_site.py --site-name "Branch-Reference" --include-wans
+
+# List ZIA Locations (to find existing names for sites.csv)
+python3 pull_site.py --list-locations
 
 # Create multiple new sites (dry run)
 python3 bulk_create.py --dry-run

@@ -253,6 +253,31 @@ def print_templates(templates: List[Dict[str, Any]]):
         tid  = t.get("id") or ""
         print(f"{name:40}  {dep:18}  {plat:10}  {tid}")
 
+# ---- Locations API (settings/locations) ----
+def fetch_locations() -> List[Dict[str, Any]]:
+    # Based on user screenshot: GET /api/v3/settings/locations?no_cache=true&refresh_token=enabled
+    params = {
+        "no_cache": "true",
+        "refresh_token": "enabled",
+    }
+    data = get_json_v3_no_trailing("settings/locations", params=params)
+    if isinstance(data, dict):
+        return data.get("locations", [])
+    return []
+
+def print_locations(locations: List[Dict[str, Any]]):
+    if not locations:
+        print("No locations found.")
+        return
+    hdr = f"{'name':40}  {'id'}"
+    print(hdr)
+    print("-" * len(hdr))
+    # Sort by name for nicer output
+    for loc in sorted(locations, key=lambda x: (x.get("name") or "").lower()):
+        name = (loc.get("name") or "")[:40]
+        lid  = loc.get("id") or ""
+        print(f"{name:40}  {lid}")
+
 def print_site_list(rows: List[Dict[str, Any]]):
     print("Available sites:")
     print("-" * 60)
@@ -454,7 +479,14 @@ def main():
     ap.add_argument("--include-ha", action="store_true", help="Include HA internal VLAN(s) in the CSV (default: excluded)")
     ap.add_argument("--list-templates", action="store_true", help="List templates (name, deployment_type, platform_type, id)")
     ap.add_argument("--template-search", default="", help="Optional name filter for --list-templates (uses API 'search' param)")
+    ap.add_argument("--list-locations", action="store_true", help="List ZIA locations (name, id)")
     args = ap.parse_args()
+
+    # Handle location listing early-out
+    if args.list_locations:
+        locs = fetch_locations()
+        print_locations(locs)
+        return
 
     # Handle template listing early-out
     if args.list_templates:
