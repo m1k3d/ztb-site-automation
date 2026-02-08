@@ -27,7 +27,11 @@ ZPA_ENABLED=true
 ZPA_CLIENT_ID="your-client-id"
 ZPA_CLIENT_SECRET="your-client-secret"
 ZPA_CUSTOMER_ID="your-customer-id"
-ZPA_BASE_URL="https://config.zpatwo.net"
+# Any ZPA cloud is supported. Examples:
+# ZPA_BASE_URL="https://config.private.zscaler.com"
+# ZPA_BASE_URL="https://config.zscalerthree.net"
+# ZPA_BASE_URL="private.zscaler.com"   # also accepted (auto-normalized)
+ZPA_BASE_URL="https://config.private.zscaler.com"
 ```
 
 

@@ -11,6 +11,7 @@ import json
 import requests
 import base64
 from typing import Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
 
 # Import zpa_login to ensure we can get a token
 try:
@@ -166,11 +167,43 @@ def get_geo_location(city: str, country: str) -> Tuple[str, str]:
 
 def _get_zpn_base_url(base_url: str) -> str:
     """
-    Helper to switch from config.zpatwo.net to api.zpatwo.net for ZPN endpoints if needed.
+    Switch from config.<cloud> to api.<cloud> for ZPN endpoints.
     """
-    if "config.zpatwo.net" in base_url:
-        return base_url.replace("config.zpatwo.net", "api.zpatwo.net")
-    return base_url
+    parsed = urlparse(base_url.strip())
+    scheme = parsed.scheme or "https"
+    host = (parsed.netloc or "").strip().strip("/")
+    if not host:
+        return base_url
+    if host.lower().startswith("config."):
+        host = "api." + host[7:]
+    elif not host.lower().startswith("api."):
+        host = "api." + host
+    return f"{scheme}://{host}"
+
+
+def _normalize_zpa_base_url(raw: str) -> str:
+    """
+    Normalize env input to a config host URL.
+    """
+    value = (raw or "").strip().strip('"').strip("'")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"https://{value}"
+
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").strip().strip("/")
+    if not host:
+        return ""
+
+    host = host.split("/", 1)[0]
+    if host.lower().startswith("api."):
+        host = "config." + host[4:]
+    elif not host.lower().startswith("config."):
+        host = "config." + host
+
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{host}"
 
 def create_app_connector_group(base_url: str, customer_id: str, token: str, name: str, city: str, country: str, dry_run: bool = False) -> Optional[str]:
     """
@@ -181,7 +214,7 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
         print(f"   [DRY-RUN] Would create App Connector Group: name='{name}', location='{city}, {country}'")
         return "dry-run-group-id-123"
 
-    # ZPN endpoints often use api.zpatwo.net instead of config.zpatwo.net
+    # ZPN endpoints use api.<cloud> while config APIs use config.<cloud>
     zpn_base = _get_zpn_base_url(base_url)
     url = f"{zpn_base}/zpn/api/v1/admin/customers/{customer_id}/assistantGroup?scopeId=0"
     headers = get_zpa_headers(token)
@@ -240,7 +273,7 @@ def create_provisioning_key(base_url: str, customer_id: str, token: str, name: s
         print(f"   [DRY-RUN] Would create ZPA Provisioning Key: name='{name}', maxUsage={max_usage}")
         return "dry-run-key-12345"
 
-    # ZPN endpoints often use api.zpatwo.net instead of config.zpatwo.net
+    # ZPN endpoints use api.<cloud> while config APIs use config.<cloud>
     zpn_base = _get_zpn_base_url(base_url)
     url = f"{zpn_base}/zpn/api/v1/admin/customers/{customer_id}/associationType/ASSISTANT_GRP/nonce?scopeId=0"
     headers = get_zpa_headers(token)
@@ -331,9 +364,13 @@ def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, z
         print(f"❌ ZPA Login failed: {e}", file=sys.stderr)
         return False
 
-    zpa_base = os.getenv("ZPA_BASE_URL", "").rstrip("/")
+    zpa_base = _normalize_zpa_base_url(os.getenv("ZPA_BASE_URL", ""))
     if not zpa_base:
-        print("❌ Missing ZPA_BASE_URL", file=sys.stderr)
+        print(
+            "❌ Missing or invalid ZPA_BASE_URL "
+            "(expected e.g. 'https://config.private.zscaler.com' or 'private.zscaler.com')",
+            file=sys.stderr,
+        )
         return False
 
     # 2. Get Customer ID

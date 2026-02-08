@@ -17,6 +17,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import urlparse
 import requests
 
 # Optional: load from .env if present (non-fatal if missing)
@@ -58,6 +59,39 @@ def compute_expiry_iso(seconds: int) -> str:
     return exp_dt.isoformat().replace("+00:00", "Z")
 
 
+def normalize_zpa_base_url(raw: str) -> str:
+    """
+    Normalize ZPA base input to a config host URL.
+
+    Accepted inputs:
+    - https://config.private.zscaler.com
+    - https://api.private.zscaler.com
+    - private.zscaler.com
+    - config.zscalerthree.net
+    """
+    value = (raw or "").strip().strip('"').strip("'")
+    if not value:
+        raise ValueError("ZPA_BASE_URL is empty")
+
+    if "://" not in value:
+        value = f"https://{value}"
+
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").strip().strip("/")
+    if not host:
+        raise ValueError(f"Invalid ZPA_BASE_URL: {raw!r}")
+
+    host = host.split("/", 1)[0]
+    host_l = host.lower()
+    if host_l.startswith("api."):
+        host = "config." + host[4:]
+    elif not host_l.startswith("config."):
+        host = "config." + host
+
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{host}"
+
+
 def zpa_login(write_env: bool = True, quiet: bool = False) -> Tuple[str, Optional[str]]:
     """
     Authenticate to ZPA API (legacy /signin endpoint) and return (token, iso_expiry).
@@ -65,9 +99,17 @@ def zpa_login(write_env: bool = True, quiet: bool = False) -> Tuple[str, Optiona
     If write_env=True, updates .env with ZPA_BEARER and ZPA_BEARER_EXPIRES_AT.
     If quiet=True, suppresses console output.
     """
-    base = os.getenv("ZPA_BASE_URL", "").rstrip("/")
-    if not base:
+    raw_base = os.getenv("ZPA_BASE_URL", "")
+    if not raw_base:
         raise SystemExit("❌ Missing ZPA_BASE_URL in .env")
+    try:
+        base = normalize_zpa_base_url(raw_base)
+    except ValueError as e:
+        raise SystemExit(
+            "❌ Invalid ZPA_BASE_URL. Expected formats like "
+            "'https://config.private.zscaler.com' or 'private.zscaler.com'. "
+            f"Details: {e}"
+        )
 
     client_id = get_env("ZPA_CLIENT_ID")
     client_secret = get_env("ZPA_CLIENT_SECRET")
