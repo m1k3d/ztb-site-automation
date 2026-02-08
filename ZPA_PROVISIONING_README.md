@@ -77,9 +77,7 @@ For each site with `appc_provision=1`:
 - Verify ZPA credentials are correct
 - Check that you have access to enrollment certificates in ZPA console
 
-### "Failed to get App Connector Group ID"
-- Ensure at least one App Connector Group exists in your ZPA tenant
-- Or ensure a group is available in the ZPA portal
+
 
 ### "Failed to create ZPA Provisioning Key"
 - Check the error message for details
