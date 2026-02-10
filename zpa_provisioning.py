@@ -165,20 +165,7 @@ def get_geo_location(city: str, country: str) -> Tuple[str, str]:
     
     return "0.0", "0.0"
 
-def _get_zpn_base_url(base_url: str) -> str:
-    """
-    Switch from config.<cloud> to api.<cloud> for ZPN endpoints.
-    """
-    parsed = urlparse(base_url.strip())
-    scheme = parsed.scheme or "https"
-    host = (parsed.netloc or "").strip().strip("/")
-    if not host:
-        return base_url
-    if host.lower().startswith("config."):
-        host = "api." + host[7:]
-    elif not host.lower().startswith("api."):
-        host = "api." + host
-    return f"{scheme}://{host}"
+
 
 
 def _normalize_zpa_base_url(raw: str) -> str:
@@ -207,51 +194,52 @@ def _normalize_zpa_base_url(raw: str) -> str:
 
 def create_app_connector_group(base_url: str, customer_id: str, token: str, name: str, city: str, country: str, dry_run: bool = False) -> Optional[str]:
     """
-    Creates an App Connector Group using the assistantGroup endpoint.
-    Returns the group ID (zcomponentId).
+    Creates an App Connector Group using the standard mgmtconfig endpoint.
+    Returns the group ID.
     """
     if dry_run:
         print(f"   [DRY-RUN] Would create App Connector Group: name='{name}', location='{city}, {country}'")
         return "dry-run-group-id-123"
 
-    # ZPN endpoints use api.<cloud> while config APIs use config.<cloud>
-    zpn_base = _get_zpn_base_url(base_url)
-    url = f"{zpn_base}/zpn/api/v1/admin/customers/{customer_id}/assistantGroup?scopeId=0"
+    # Use mgmtconfig endpoint (usually on config.<cloud>)
+    # standard base_url from _normalize_zpa_base_url is already config.<cloud>
+    url = f"{base_url}/mgmtconfig/v1/admin/customers/{customer_id}/appConnectorGroup"
     headers = get_zpa_headers(token)
     
     lat, lon = get_geo_location(city, country)
     location_str = f"{city}, {country}" if city and country else (city or country or "Unknown")
     
+    # Map country to Code if possible
+    country_code = "NL" # generic default from original code
+    c_lower = country.lower()
+    if c_lower in ("united states", "usa", "us"): country_code = "US"
+    elif c_lower in ("united kingdom", "uk", "gb"): country_code = "GB"
+    elif c_lower in ("germany", "de"): country_code = "DE"
+    elif c_lower in ("france", "fr"): country_code = "FR"
+    elif c_lower in ("australia", "au"): country_code = "AU"
+    elif c_lower in ("canada", "ca"): country_code = "CA"
+    elif c_lower in ("india", "in"): country_code = "IN"
+    elif c_lower in ("japan", "jp"): country_code = "JP"
+    elif c_lower in ("singapore", "sg"): country_code = "SG"
+    elif c_lower in ("switzerland", "ch"): country_code = "CH"
+
     payload = {
-        "enabled": True,
-        "isPublic": False,
-        "location": location_str,
-        "dnsQueryType": "IPV4_IPV6",
-        "countryCode": "NL", # Defaulting to NL based on screenshot, but should ideally map from country name
-        "dcHostingInfo": "",
+        "name": name,
         "description": f"Auto-created for {name}",
+        "enabled": True,
+        "cityCountry": location_str,
+        "countryCode": country_code,
         "latitude": lat,
         "longitude": lon,
-        "name": name,
-        "objectType": "ConnectorGroup",
-        "overrideVersionProfile": False,
-        "praEnabled": False,
-        "tcpQuickAckApp": False,
-        "tcpQuickAckAssistant": False,
-        "tcpQuickAckReadAssistant": False,
-        "trustedNetworks": [],
+        "location": location_str,
+        "dnsQueryType": "IPV4_IPV6",
         "upgradeDay": "SUNDAY",
-        "upgradeTimeInSecs": "82800",
-        "useInDrMode": False,
-        "versionProfileToggleBox": "0",
+        "upgradeTimeInSecs": "7200",
+        "overrideVersionProfile": True,
+        "versionProfileId": "0", # Default / Recommended
+        "lssAppConnectorGroup": False,
         "wafDisabled": False
     }
-    
-    # Simple country code mapping (can be expanded)
-    if country.lower() in ("united states", "usa", "us"): payload["countryCode"] = "US"
-    elif country.lower() in ("united kingdom", "uk", "gb"): payload["countryCode"] = "GB"
-    elif country.lower() in ("germany", "de"): payload["countryCode"] = "DE"
-    elif country.lower() in ("france", "fr"): payload["countryCode"] = "FR"
     
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -267,28 +255,23 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
 
 def create_provisioning_key(base_url: str, customer_id: str, token: str, name: str, group_id: str, enrollment_cert_id: str, max_usage: int = 2, dry_run: bool = False) -> str:
     """
-    Creates an App Connector Provisioning Key using the nonce endpoint.
+    Creates an App Connector Provisioning Key using the standard mgmtconfig endpoint.
+    Association Type: CONNECTOR_GRP
     """
     if dry_run:
         print(f"   [DRY-RUN] Would create ZPA Provisioning Key: name='{name}', maxUsage={max_usage}")
         return "dry-run-key-12345"
 
-    # ZPN endpoints use api.<cloud> while config APIs use config.<cloud>
-    zpn_base = _get_zpn_base_url(base_url)
-    url = f"{zpn_base}/zpn/api/v1/admin/customers/{customer_id}/associationType/ASSISTANT_GRP/nonce?scopeId=0"
+    # Use mgmtconfig endpoint
+    url = f"{base_url}/mgmtconfig/v1/admin/customers/{customer_id}/associationType/CONNECTOR_GRP/provisioningKey"
     headers = get_zpa_headers(token)
     
     payload = {
-        "enabled": True,
-        "exportable": True,
         "name": name,
         "maxUsage": str(max_usage),
-        "autoSign": 1,
-        "nonceAssociationType": "ASSISTANT_GRP",
-        "objectType": "ConnectorNonce",
-        "signingCertId": enrollment_cert_id,
-        "usageCount": 0,
-        "zcomponentId": group_id
+        "enrollmentCertId": enrollment_cert_id,
+        "zcomponentId": group_id,
+        "associationType": "CONNECTOR_GRP"
     }
     
     try:
@@ -296,11 +279,11 @@ def create_provisioning_key(base_url: str, customer_id: str, token: str, name: s
         resp.raise_for_status()
         data = resp.json()
         
-        # The key is in the 'nonce' field based on the screenshot response
-        # But sometimes it might be 'provisioningKey'. The screenshot shows the response header/preview but not the full body clearly for the key itself, 
-        # but the user said "nonce field ... which has the provision key".
-        # Let's check both.
-        key = data.get("nonce") or data.get("provisioningKey")
+        # The key is usually in 'provisioningKey' or simply returned as the key string in some versions,
+        # but standard API returns an object with 'key' or 'provisioningKey'.
+        # Docs say: { "provisioningKey": "..." } or similar.
+        # Let's check a few common fields.
+        key = data.get("provisioningKey") or data.get("key")
         
         if key:
             print(f"   ✅ Created provisioning key: {name}")
