@@ -4,7 +4,7 @@
 Author: **Mike Dechow (@m1k3d)**  
 Repo: [github.com/m1k3d/ztb-site-automation](https://github.com/m1k3d/ztb-site-automation)  
 License: MIT  
-Version: 1.4.0
+Version: 1.5.0
 
 ---
 
