@@ -3,7 +3,7 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-# version: 1.4.0
+# version: 1.5.0
 #
 # Usage:
 #   python3 pull_site.py                                     # lists sites
