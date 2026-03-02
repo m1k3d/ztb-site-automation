@@ -2,6 +2,7 @@
 """
 zpa_provisioning.py
 - Creates ZPA App Connector Provisioning Keys
+- Add support all tenant types
 - Configures ZTB sites with the generated keys
 """
 
