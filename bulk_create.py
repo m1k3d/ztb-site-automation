@@ -6,7 +6,9 @@ Author: Mike Dechow (@m1k3d)
 Repo: github.com/m1k3d/ztb-site-automation
 License: MIT
 
-Version: 1.4.0
+Version: 1.6.1
+  - Adds explicit ZIA location modes: new, existing, none, and legacy-compatible auto
+  - New ZIA locations include the required location_template_id
   - VRRP after VLANs
   - VRRP link discovered via GET /api/v2/Gateway/interfaces (type == "ha"), with optional CSV override
   - Tracked interfaces strictly LAN+WAN (never mgmt, never the HA link), and must exist on all HA peers (intersection)
@@ -31,6 +33,7 @@ import requests
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import zpa_provisioning
 import ztb_login
+from location_config import prepare_location_context
 
 # ------------------------
 # tiny .env loader (OVERWRITES existing env vars)
@@ -318,6 +321,61 @@ class LocationResolver:
         return self._by_lower_name.get(name.strip().lower())
 
 ZIA_LOCATIONS = LocationResolver()
+
+# --- ZIA Location Templates list (for human-readable name -> ID resolution) ---
+def get_json_v3_location_templates() -> List[Dict[str, Any]]:
+    params = {
+        "refresh_token": "enabled",
+    }
+    url = f"{API_V3}/settings/location_templates"
+    headers = _v3_headers()
+    data = get_json(url, params=params, headers=headers)
+
+    # Response shape verified against the Add Site browser capture.
+    if not isinstance(data, dict) or not isinstance(data.get("location_templates"), list):
+        raise ValueError("Location-template response must contain a location_templates list")
+    return data["location_templates"]
+
+
+class LocationTemplateResolver:
+    def __init__(self):
+        self._by_lower_name: Dict[str, int] = {}
+        self._loaded = False
+
+    def _load(self):
+        if self._loaded:
+            return
+        templates = get_json_v3_location_templates()
+        by_name: Dict[str, int] = {}
+        for template in templates:
+            if not isinstance(template, dict):
+                raise ValueError("Invalid entry in location_templates response")
+            name = str(template.get("name") or "").strip()
+            template_id = template.get("id")
+            try:
+                numeric_id = int(str(template_id))
+            except (TypeError, ValueError):
+                raise ValueError("Location-template response contains an invalid ID") from None
+            if not name or numeric_id <= 0:
+                raise ValueError("Location-template response requires a name and positive ID")
+            if name.lower() in by_name:
+                raise ValueError(
+                    f"Duplicate location template name '{name}'; specify location_template_id in CSV"
+                )
+            by_name[name.lower()] = numeric_id
+        self._by_lower_name = by_name
+        self._loaded = True
+        if DEBUG:
+            print(f"Loaded {len(self._by_lower_name)} ZIA Location Templates")
+
+    def resolve(self, name: str) -> Optional[int]:
+        if not name:
+            return None
+        self._load()
+        return self._by_lower_name.get(name.strip().lower())
+
+
+ZIA_LOCATION_TEMPLATES = LocationTemplateResolver()
 
 # -------- value normalization --------
 def _clean_bool(v: Any) -> bool:
@@ -1061,25 +1119,37 @@ def main():
         # Jinja context
         ctx = dict(r)
         
-        # Resolve ZIA Location (if zia_location_name exists, try to find its ID)
-        zname = (r.get("zia_location_name") or "").strip()
-        existing_loc_id = None
-        if zname:
-            # We have a name, check if it exists in ZIA
-            existing_loc_id = ZIA_LOCATIONS.resolve(zname)
-            if existing_loc_id and DEBUG:
-                print(f"  Mapping zia_location_name='{zname}' -> existing_location_id={existing_loc_id}")
-                print(f"  INFO: Will use existing ZIA Location ID {existing_loc_id} ({zname})")
-            elif existing_loc_id:
-                # Always show this info even if not debug, since it changes behavior significantly
-                print(f"  INFO: Using existing ZIA Location ID {existing_loc_id} for '{zname}'")
-            elif zname and not existing_loc_id:
-                print(f"  WARN: zia_location_name='{zname}' not found in ZIA, will create NEW location.")
-
         ctx["template_id"] = template_id
         ctx["dhcp_service_mode"] = svc
-        if existing_loc_id:
-            ctx["existing_location_id"] = existing_loc_id
+
+        # The UI now has three explicit choices: New Location, Existing Location,
+        # and None. Blank/auto retains the earlier name-resolution behavior.
+        try:
+            location_ctx = prepare_location_context(
+                r,
+                ZIA_LOCATIONS.resolve,
+                ZIA_LOCATION_TEMPLATES.resolve,
+            )
+        except (ValueError, RuntimeError, requests.RequestException) as e:
+            print(f"ERR : {site_name}: {e}")
+            fail += 1
+            continue
+        ctx.update(location_ctx)
+
+        zname = (r.get("zia_location_name") or "").strip()
+        if location_ctx["location_type"] == "existing":
+            print(
+                f"  INFO: Using existing ZIA Location ID "
+                f"{location_ctx['existing_location_id']} for '{zname}'"
+            )
+        elif location_ctx["location_type"] == "new":
+            print(
+                f"  INFO: Creating ZIA Location '{zname or site_name}' with "
+                f"Location Template '{location_ctx['location_template_name']}' "
+                f"(ID {location_ctx['location_template_id']})"
+            )
+        else:
+            print("  INFO: Creating site without a ZIA Location")
 
         # Render site payload
         try:
@@ -1196,6 +1266,7 @@ def main():
              zpa_provisioning.provision_zpa_for_site(r, session, base_root, cluster_id=cluster_id, dry_run=args.dry_run)
 
     print("\nDone.")
+    return 1 if fail else 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -3,7 +3,7 @@
 # Author: Mike Dechow (@m1k3d)
 # Repo: github.com/m1k3d/ztb-site-automation
 # License: MIT
-# version: 1.5.0
+# version: 1.6.1
 #
 # Usage:
 #   python3 pull_site.py                                     # lists sites
@@ -30,7 +30,7 @@
 #       · If any request returns 401 once, we call `ztb_login.py`, update the session header, and retry ONCE.
 #       · Messages are visible (no hidden background behavior).
 
-import os, sys, json, csv, argparse, pathlib, subprocess
+import os, sys, json, csv, argparse, pathlib, subprocess, tempfile
 from typing import Any, Dict, List, Optional, Tuple
 import requests
 
@@ -383,34 +383,59 @@ CSV_HEADER = (
     "site_name,gateway_name,gateway_name_b,city,country,"
     "wan0_ip,wan0_mask,wan0_gw,wan1_ip,wan1_mask,wan1_gw,"
     "template_name,template_id,wan_dns,private_dns,dhcp_server_ip,zia_location_name,"
+    "location_type,location_template_name,location_template_id,"
     "wan_interface_name,wan1_interface_name,vlans_file,post,appc_provision\n"
 )
 
-def ensure_sites_csv_header():
-    if not CSV_PATH.exists():
-        CSV_PATH.write_text(CSV_HEADER, encoding="utf-8")
-
 def upsert_sites_csv_row(row: Dict[str, str]):
-    ensure_sites_csv_header()
     existing: List[Dict[str, str]] = []
+    fieldnames = CSV_HEADER.strip().split(",")
     if CSV_PATH.exists():
         with open(CSV_PATH, newline="", encoding="utf-8") as f:
-            existing = list(csv.DictReader(f))
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or fieldnames
+            existing = list(reader)
 
     out: List[Dict[str, str]] = []
     seen = False
     for r in existing:
         if r.get("site_name", "").strip().lower() == row["site_name"].strip().lower():
-            out.append(row); seen = True
+            merged = {**r, **row}
+            # These are deployment choices, not values recovered by the site API.
+            for key in ("location_type", "location_template_name", "location_template_id"):
+                if str(r.get(key) or "").strip():
+                    merged[key] = r[key]
+            out.append(merged); seen = True
         else:
             out.append(r)
     if not seen:
         out.append(row)
 
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(out[0].keys()))
-        writer.writeheader()
-        writer.writerows(out)
+    # Keep old/custom columns and add new columns regardless of row order.
+    for item in out:
+        if None in item:
+            raise ValueError("sites.csv contains a row with more values than headers; file unchanged")
+        for key in item:
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    # Replace only after the entire CSV has been written successfully.
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", encoding="utf-8", dir=CSV_PATH.parent,
+            prefix=CSV_PATH.name + ".", suffix=".tmp", delete=False,
+        ) as f:
+            temp_path = pathlib.Path(f.name)
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(out)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, CSV_PATH)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 # ------------------------
 # helpers
@@ -582,6 +607,9 @@ def main():
         "private_dns":         private_dns_ips,
         "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
         "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or args.site_name,
+        "location_type":       "auto",
+        "location_template_name": "Default Location Template",
+        "location_template_id": "",
 
         "wan_interface_name":  wan0_if,
         "wan1_interface_name": wan1_if,

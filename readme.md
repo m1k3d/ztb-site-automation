@@ -4,7 +4,7 @@
 Author: **Mike Dechow (@m1k3d)**  
 Repo: [github.com/m1k3d/ztb-site-automation](https://github.com/m1k3d/ztb-site-automation)  
 License: MIT  
-Version: 1.5.0
+Version: 1.6.1
 
 ---
 
@@ -151,14 +151,26 @@ Creates:
 
 Edit the generated sites.csv and create additional rows for each site you want to deploy.
 
-site_name,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan0_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,wan_dns,private_dns,vlans_file,post,appc_provision
-Amsterdam,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8","10.0.0.5,10.0.0.6",vlans_amsterdam.csv,1,1
+site_name,country,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,wan_dns,private_dns,zia_location_name,location_type,location_template_name,location_template_id,vlans_file,post,appc_provision
+Amsterdam,Netherlands,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8","10.0.0.5,10.0.0.6",Amsterdam,new,Default Location Template,,vlans_amsterdam.csv,1,1
 
 	•	post=1 marks which rows to deploy.
 	•	Use template_name (preferred) or template_id.
 	•	template_id is automatically resolved if you provide template name (you can leave this cell blank).
 	•	DHCP relay IPs must be defined when required by the template.
-	•	zia_location_name allows reusing an existing ZIA location. If set, the script resolves its ID and links it. If blank or new name, a new location is created/derived.
+	•	`location_type` mirrors the current Add Site UI: `new`, `existing`, or `none`.
+	•	`new` creates `zia_location_name` and resolves `location_template_name` to its tenant-specific ID automatically.
+	•	`location_template_name` defaults to `Default Location Template`; set a different human-readable name when needed.
+	•	`location_template_id` remains available as an optional override, but normally stays blank.
+	•	Location-template settings belong in `sites.csv`. The script does not read `ZIA_LOCATION_TEMPLATE_NAME` or `ZIA_LOCATION_TEMPLATE_ID` from `.env`; remove these if you added them previously.
+	•	`new` requires `country`. Template names resolve through `GET /api/v3/settings/location_templates`; the resulting ID is sent as `location.location_template_id`, alongside `location.details`.
+	•	`existing` resolves `zia_location_name` and fails safely if the location does not exist.
+	•	`none` deploys the site without associating a ZIA location.
+	•	Blank or `auto` preserves the earlier behavior: reuse a matching `zia_location_name`; otherwise create a new location using the named Location Template.
+
+The new-location endpoint and payload structure were verified against a successful browser request. Existing and none modes have local regression coverage but were not captured in that workflow. `pull_site.py` uses `auto` and the default location template for newly exported rows; those defaults do not describe the original site's creation settings. Existing CSV location choices and custom columns are preserved on re-export.
+
+Run local regression checks with `python3 -m unittest discover -s tests -v`. Tests use fixture responses and never deploy sites. A dry run still uses authenticated API lookups, but does not deploy a site.
 
 ⸻
 
