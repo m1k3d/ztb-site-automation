@@ -9,11 +9,10 @@ The CLI and a future UI should use the same validation and deployment engine. Th
 - `input_validation.py`: CSV/inline-row validation and normalized VLAN snapshots.
 - `automation_config.py`, `api_client.py`: explicit configuration and shared ZTB authentication/session.
 - `deployment_engine.py`: plan, execute, and structured per-site results; no import-time I/O.
-- `site_payload.py`: JSON-compatible payload construction; names are not interpolated into JSON text.
+- `site_payload.py`: JSON-compatible payload construction; names are not interpolated into JSON text. Payload customizations belong here with tests.
 - `location_config.py`: location mode rules.
 - `pull_site.py`: reference export and listing using the same configuration/client.
 - `ztb_login.py`, `zpa_login.py`, `zpa_provisioning.py`: authentication and optional ZPA operations.
-- `site_template.json.j2`: retained legacy reference; **no longer executed**. Payload customizations belong in `site_payload.py` with tests.
 
 A future UI can supply site dictionaries with an inline `vlans` list to `validate_rows()`, then use `DeploymentEngine.plan()` and `execute()` (or `run()`). No CSV is required by the engine. Use the same engine for planning/execution and re-plan after editing inputs or changing tenants. Plans contain runtime credentials for optional ZPA and should not be serialized or persisted. `BatchResult` exposes `sites`, `issues`, and `exit_code`; each site has status, stage results, and errors. Engine progress accepts an `emit` callback; legacy ZPA helpers also print details.
 
