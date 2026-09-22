@@ -26,6 +26,12 @@ def save_report(path, result, *, dry_run=False):
     }
     sites = [dict(name=s.name, status=s.status, stages=s.stages,
                   next_action=actions.get(s.status, 'Inspect the site before retrying.')) for s in result.sites]
+    for site, outcome in zip(sites, result.sites):
+        if outcome.zpa_segments:
+            site['zpa_segments'] = outcome.zpa_segments
+            if outcome.zpa_segments.get('status') == 'staged_disabled':
+                site['next_action'] = ('Review ZPA destinations and access policy before enabling the staged application segment.'
+                                       if outcome.status == 'success' else site['next_action'] + ' ZPA application segment remains disabled.')
     report = dict(mode='preview' if dry_run else 'deployment',
                   finished_at=datetime.now(timezone.utc).isoformat(), exit_code=result.exit_code,
                   preflight_issue_count=len(result.issues), sites=sites)
@@ -38,5 +44,8 @@ def save_report(path, result, *, dry_run=False):
     for site in sites:
         failed = ', '.join(k for k,v in site['stages'].items() if not v)
         lines.append(f"{site['name']}: {site['status']}" + (f' — failed stages: {failed}' if failed else ''))
+        if site.get('zpa_segments'):
+            staged = site['zpa_segments']
+            lines.append(f"ZPA LAN: {staged['application_name']} — {staged['status']}; {len(staged['subnets'])} subnet(s); requested disabled, ICMP off.")
         lines.append(site['next_action'])
     path.with_suffix('.txt').write_text('\n'.join(lines)+'\n')

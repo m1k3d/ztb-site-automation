@@ -333,7 +333,7 @@ def prepare_zpa(config: Settings) -> ZPAContext:
     return ZPAContext(base, customer_id, token, certificate)
 
 
-def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, ztb_api_base: str, cluster_id: int, dry_run: bool = False, *, config: Optional[Settings] = None, context: Optional[ZPAContext] = None) -> bool:
+def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, ztb_api_base: str, cluster_id: int, dry_run: bool = False, *, config: Optional[Settings] = None, context: Optional[ZPAContext] = None, resources: Optional[dict] = None) -> bool:
     """
     Main orchestrator function for a single site row.
     """
@@ -365,6 +365,11 @@ def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, z
     if not group_id:
         print(f"❌ Failed to create App Connector Group", file=sys.stderr)
         return False
+
+    if resources is not None:
+        # Only the group returned by this create call may be used for LAN staging.
+        # Never place the provisioning key or authentication token in results.
+        resources["appConnectorGroup"] = {"id": group_id, "name": group_name}
 
     # 5. Create Provisioning Key
     # Use site name as key name for traceability

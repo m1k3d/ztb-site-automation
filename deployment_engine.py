@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Tuple, Optional, Iterable, Set
 
 import requests
 import zpa_provisioning
+import zpa_segments
 from api_client import ZTBClient
 from automation_config import Settings
 from input_validation import ValidationIssue, ValidationResult
@@ -28,6 +29,7 @@ class PreparedSite:
     vlans: list
     payload: dict
     template_id: str
+    zpa_segment_plan: object = None
 
 
 @dataclass
@@ -44,6 +46,7 @@ class SiteResult:
     status: str
     stages: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
+    zpa_segments: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -192,12 +195,19 @@ class DeploymentEngine:
                 location = prepare_location_context(row, self.ZIA_LOCATIONS.resolve, self.ZIA_LOCATION_TEMPLATES.resolve)
                 stage = "site payload"
                 payload = build_site_payload(row, location)
-                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id))
+                stage = "ZPA segments"
+                segment_plan = zpa_segments.build_segment_plan(row["site_name"], site.vlans)
+                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan))
             except (Exception, SystemExit) as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, stage, f"{row.get('site_name')}: {exc}"))
         if wants_zpa and not plan.issues:
             try:
                 plan.zpa_context = zpa_provisioning.prepare_zpa(self.config)
+                segments = [s.zpa_segment_plan for s in plan.sites if s.zpa_segment_plan]
+                if segments:
+                    inventory = zpa_segments.load_inventory(plan.zpa_context)
+                    zpa_segments.check_batch_conflicts(segments, inventory)
+                    self.log(f"ZPA preflight: {len(inventory['application'])} existing application segment(s); {len(segments)} new disabled segment(s) planned. Confirm tenant entitlement before deployment.")
             except (Exception, SystemExit) as exc:
                 plan.issues.append(ValidationIssue("configuration", 0, "ZPA preflight", str(exc)))
         return plan
@@ -226,9 +236,17 @@ class DeploymentEngine:
                 continue
             if dry_run:
                 self.log(f"DRY: {name}: site-payload bytes={len(json.dumps(site.payload))}; VLANs={len(site.vlans)}; HA={bool(row.get('gateway_name_b'))}; ZPA={row.get('appc_provision') == '1'}")
-                result.sites.append(SiteResult(name, "preview"))
+                preview = SiteResult(name, "preview")
+                if site.zpa_segment_plan:
+                    preview.zpa_segments = site.zpa_segment_plan.report()
+                    preview.zpa_segments["status"] = "preview"
+                    self.log(f"DRY: ZPA creates 1 disabled application segment '{site.zpa_segment_plan.application_name}', 1 segment group, 1 server group; subnets={', '.join(site.zpa_segment_plan.subnets)}; TCP/UDP=1-52,54-65535; ICMP=NONE; health=ON_ACCESS; connector group='{name}' (created by this run)")
+                result.sites.append(preview)
                 continue
             entry = SiteResult(name, "failed")
+            if site.zpa_segment_plan:
+                entry.zpa_segments = site.zpa_segment_plan.report()
+                entry.zpa_segments["status"] = "blocked"
             result.sites.append(entry)
             try:
                 ok, message, cluster_hint = self.create_site(site.template_id, site.payload)
@@ -271,9 +289,19 @@ class DeploymentEngine:
             if is_ha:
                 actions.append(("VRRP", lambda: bool(site_id) and self.configure_vrrp(gateways, cluster_id, site.vlans, row, site_id)))
             if row.get("appc_provision") == "1":
-                actions.append(("ZPA", lambda: zpa_provisioning.provision_zpa_for_site(row, self.client, self.client.base_root, cluster_id=cluster_id, config=self.config, context=plan.zpa_context)))
+                resources = entry.zpa_segments.get("resources") if site.zpa_segment_plan else None
+                actions.append(("ZPA", lambda: zpa_provisioning.provision_zpa_for_site(row, self.client, self.client.base_root, cluster_id=cluster_id, config=self.config, context=plan.zpa_context, resources=resources)))
             for stage, action in actions:
                 entry.stages[stage] = self.run_site_stage(name, stage, action)
+            if site.zpa_segment_plan:
+                if entry.stages.get("ZPA") and entry.stages.get("VLANs"):
+                    connector_id = entry.zpa_segments["resources"].get("appConnectorGroup", {}).get("id")
+                    entry.stages["ZPA segments"] = self.run_site_stage(name, "ZPA segments", lambda: zpa_segments.stage_segments(
+                        plan.zpa_context, site.zpa_segment_plan, connector_id, entry.zpa_segments, emit=self.log,
+                    ))
+                else:
+                    entry.stages["ZPA segments"] = False
+                    self.log(f"ERR : {name}: ZPA segments blocked because VLAN or App Connector provisioning did not complete")
             incomplete = [stage for stage, success in entry.stages.items() if not success]
             if incomplete:
                 entry.errors.append("incomplete stages: " + ", ".join(incomplete))

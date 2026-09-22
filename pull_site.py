@@ -211,7 +211,7 @@ def match_row_by_name(rows: List[Dict[str, Any]], site_name: str) -> Optional[Di
 # ------------------------
 VLAN_CSV_FIELDS = [
     "name", "tag", "subnet", "default_gateway", "dhcp_start", "dhcp_end",
-    "interface", "zone", "enabled", "share_over_vpn", "dhcp_service"
+    "interface", "zone", "enabled", "share_over_vpn", "dhcp_service", "zpa_include"
 ]
 
 def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
@@ -271,6 +271,8 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "enabled": enabled,
             "share_over_vpn": share_over_vpn,
             "dhcp_service": dhcp_service_disp,
+            # This is a local deployment choice, not inferred from ZTB or VPN sharing.
+            "zpa_include": "0",
         })
     return out
 

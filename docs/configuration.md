@@ -47,6 +47,8 @@ Required: name, tag (1–4094), subnet, default gateway, and interface. Subnet a
 
 `enabled` defaults to true; `share_over_vpn` defaults to false. Both accept true/false, 1/0, yes/no, y/n. DHCP service accepts `inherit`/`on`, `no_dhcp`/`off`, or `non_airgapped`/`non-airgapped`. If blank, a supplied range implies inherit; otherwise no_dhcp. Zone defaults to `LAN Zone`.
 
+Optional `zpa_include` defaults to false and accepts the same boolean values. Set it to `1` on selected LAN VLANs to create **one disabled ZPA application segment per site** containing their subnets. Requires `appc_provision=1` on the site; there is no new site flag. It is independent of `share_over_vpn` and is never sent to the ZTB network API. Exports reset this local choice to `0`; existing CSVs without the column keep their original behavior. See [LAN segment staging](../ZPA_PROVISIONING_README.md#stage-a-disabled-lan-application-segment) for naming, eligibility, ports, and recovery.
+
 JSON accepts a list or a list under `rows`, `result.rows`, or `vlans`. Invalid structures fail instead of silently producing no VLANs. IPv6 is not supported by this workflow.
 
 Reference exports write JSON and CSV under `vlans/`, and update `sites.csv`. CSV excludes WAN and HA-internal VLANs by default; those are typically template-managed. `--include-wan` and `--include-ha` include them for inspection, not automatic safe redeployment. `--json-only` skips the CSV and points the exported row at the JSON, which includes unfiltered networks.

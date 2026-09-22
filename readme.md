@@ -12,6 +12,7 @@ Maintained by [Mike Dechow](https://github.com/m1k3d) · [Repository](https://gi
 
 - Creates standalone or HA sites using templates from your tenant.
 - Provisions VLANs, private DNS, and HA VRRP; optionally creates and attaches ZPA App Connector provisioning resources.
+- Optionally stages one disabled ZPA LAN application segment from VLANs marked `zpa_include=1`, linked to the new site's App Connector group. See [ZPA setup and staging](ZPA_PROVISIONING_README.md).
 - Validates selected CSV rows before deployment and offers an authenticated preview.
 - Stops an existing site from being recreated or modified by a sequential rerun.
 - Saves a short text report and structured JSON for deployment and preview runs.
@@ -159,7 +160,7 @@ Validation-only runs, unselected batches, and failures before the engine starts 
 - **Recovery:** no automatic resume or rollback. Successful stages remain after a later failure. An existing-site stop prevents full recreation but does not complete missing stages.
 - **Inventory size:** duplicate detection does not yet paginate. If the first page of up to 100 records cannot establish absence, creation is blocked. Reference listing/export is also limited to its first inventory page.
 - **Concurrent runs:** duplicate checks protect sequential reruns, not two simultaneous creators. Coordinate deployments to the same tenant.
-- **Coverage:** standalone creation, private DNS, VLAN provisioning, and existing-site stops have live test coverage. ZPA group/key creation and attachment have also been tested on a standalone Netherlands site; connector registration and HA still need live validation. IPv6 is not supported.
+- **Coverage:** standalone creation, private DNS, VLAN provisioning, and existing-site stops have live test coverage. ZPA group/key creation, attachment, and disabled LAN segment staging have also been tested on a standalone Netherlands site; connector registration and HA still need live validation. IPv6 is not supported.
 
 ## Troubleshooting
 

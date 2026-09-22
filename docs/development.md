@@ -13,6 +13,7 @@ The CLI and a future UI should use the same validation and deployment engine. Th
 - `location_config.py`: location mode rules.
 - `pull_site.py`: reference export and listing using the same configuration/client.
 - `ztb_login.py`, `zpa_login.py`, `zpa_provisioning.py`: authentication and optional ZPA operations.
+- `zpa_segments.py`: selected LAN subnet planning, paginated conflict checks, and verified creation of disabled ZPA segments linked to the new App Connector group.
 
 A future UI can supply site dictionaries with an inline `vlans` list to `validate_rows()`, then use `DeploymentEngine.plan()` and `execute()` (or `run()`). No CSV is required by the engine. Use the same engine for planning/execution and re-plan after editing inputs or changing tenants. Plans contain runtime credentials for optional ZPA and should not be serialized or persisted. `BatchResult` exposes `sites`, `issues`, and `exit_code`; each site has status, stage results, and errors. Engine progress accepts an `emit` callback; legacy ZPA helpers also print details.
 
@@ -22,11 +23,13 @@ The CLI validates all selected rows and snapshots their VLAN inputs. The engine 
 
 The CLI reserves a report before running the engine and writes the final summary after it returns. Unexpected termination can leave only a `started` record; reports are not a durable stage-by-stage recovery journal. Calling the engine directly does not automatically persist reports.
 
+LAN staging adds a `ZPA segments` stage after successful VLAN and ZPA provisioning. The exact App Connector group ID is passed from creation; no name lookup or fallback group is used. `SiteResult.zpa_segments` contains only planned settings and resource metadata, never a provisioning key or bearer token. ZPA inventory failures/conflicts block preflight; staging rechecks conflicts and reads back new objects before reporting success. POSTs are never automatically retried. A corrective PUT is allowed only to the just-created application if its disabled state was not applied.
+
 ## Offline checks
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q bulk_create.py deployment_engine.py input_validation.py automation_config.py api_client.py site_payload.py pull_site.py ztb_login.py zpa_login.py zpa_provisioning.py run_report.py
+python3 -m compileall -q bulk_create.py deployment_engine.py input_validation.py automation_config.py api_client.py site_payload.py pull_site.py ztb_login.py zpa_login.py zpa_provisioning.py zpa_segments.py run_report.py
 python3 bulk_create.py --csv examples/sites.csv --validate-only
 ```
 

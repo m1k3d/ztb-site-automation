@@ -187,11 +187,19 @@ def validate_vlan_rows(rows, source, issues):
         enabled_default = "status" not in raw or str(raw["status"]).lower() == "provisioned"
         enabled = check.check("enabled", lambda: boolean(v.get("enabled", ""), enabled_default))
         share = check.check("share_over_vpn", lambda: boolean(v.get("share_over_vpn", "")))
+        zpa_include = check.check("zpa_include", lambda: boolean(v.get("zpa_include", "")))
+        if zpa_include:
+            zone_key = re.sub(r"[^a-z0-9]", "", v["zone"].lower())
+            if "lo0" in {p.strip().lower() for p in interface.split(",")} or zone_key in {"management", "managementzone", "mgmt", "mgmtzone", "wan", "wanzone", "ha", "hazone", "hainternal"}:
+                check.error("zpa_include", "management, WAN, and HA networks cannot be included")
+            if enabled is not True:
+                check.error("zpa_include", "requires an enabled VLAN")
         output.append({
             "name": name, "display_name": name, "tag": v.get("tag", ""),
             "subnet": v.get("subnet", ""), "start_ip": v["default_gateway"],
             "default_gateway": v["default_gateway"], "interface": interface, "zone": v["zone"],
             "enabled": enabled, "share_over_vpn": share, "dhcp_service": service,
+            "zpa_include": zpa_include,
             **({"dhcp_range": f"{start}-{end}"} if start and end else {}),
         })
     return output
@@ -221,7 +229,7 @@ def load_vlan_rows(path, issues):
 def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
     """Validate CSV-like rows; UI callers may supply a `vlans` list directly."""
     result = ValidationResult()
-    site_names, gateway_names = {}, {}
+    site_names, gateway_names, zpa_names = {}, {}, {}
     for number, raw in (rows if numbered else enumerate(rows, 2)):
         check = RowValidator(source, number, result.issues)
         if not isinstance(raw, dict):
@@ -326,6 +334,21 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
             path = path.resolve()
             row["vlans_file"] = str(path)
             vlans = validate_vlan_rows(load_vlan_rows(path, result.issues), path, result.issues)
+        selected = [v for v in vlans if v.get("zpa_include") is True]
+        if selected:
+            if not appc:
+                check.error("appc_provision", "must be 1 when any VLAN has zpa_include=1; staging uses the new site's App Connector group")
+            excluded_ports = {row.get(k, "").lower() for k in ("wan_interface_name", "wan1_interface_name", "vrrp_link_interface")}
+            for vlan in selected:
+                if excluded_ports.intersection(p.strip().lower() for p in vlan["interface"].split(",")):
+                    check.error("zpa_include", f"VLAN {vlan['tag']} uses a WAN or HA link interface")
+            if not any(i.source == str(source) and i.row == number for i in result.issues):
+                from zpa_segments import build_segment_plan
+                segment = check.check("zpa_include", lambda: build_segment_plan(row["site_name"], vlans))
+                if segment:
+                    if segment.application_name in zpa_names:
+                        check.error("site_name", "generated ZPA name collides with another selected site")
+                    zpa_names[segment.application_name] = number
         result.sites.append(ValidatedSite(str(source), number, row, vlans))
     return result
 
