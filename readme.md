@@ -186,3 +186,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 Further documentation: [Configuration and export reference](docs/configuration.md) · [Optional ZPA provisioning](ZPA_PROVISIONING_README.md) · [Architecture and offline checks](docs/development.md)
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full terms.
