@@ -26,6 +26,6 @@ out/
 archive/
 
 # Local working files
-sites.csv
+/sites.csv
 /vlans/
 .~lock.*#

@@ -31,7 +31,7 @@ python3 -m compileall -q bulk_create.py deployment_engine.py input_validation.py
 python3 bulk_create.py --csv examples/sites.csv --validate-only
 ```
 
-Tests block unmocked HTTP and cover cross-site targeting, false success, all-row preflight gates, malformed inputs, CSV preservation, credential precedence, one-time 401 retry, side-effect-free imports/help, JSON escaping, sequential duplicate prevention, failed inventory checks, loopback validation, and report output. No deployment is needed to run them.
+Tests block unmocked HTTP and cover cross-site targeting, false success, all-row preflight gates, malformed inputs, CSV preservation, credential precedence, one-time 401 retry, side-effect-free imports/help, JSON escaping, sequential duplicate prevention, failed inventory checks, loopback validation, ZPA group/key certificate consistency, and report output. No deployment is needed to run them.
 
 For future changes, check: quickstart matches CLI; validation precedes writes; site targets are isolated; requested-stage failures affect exit status; rerun limits are explicit; credentials are not logged; existing payload contracts and offline regressions still pass.
 

@@ -166,11 +166,13 @@ def get_geo_location(city: str, country: str) -> Tuple[str, str]:
 
 
 
-def create_app_connector_group(base_url: str, customer_id: str, token: str, name: str, city: str, country: str, dry_run: bool = False) -> Optional[str]:
+def create_app_connector_group(base_url: str, customer_id: str, token: str, name: str, city: str, country: str, dry_run: bool = False, *, enrollment_cert_id: str = "") -> Optional[str]:
     """
     Creates an App Connector Group using the standard mgmtconfig endpoint.
     Returns the group ID.
     """
+    if not str(enrollment_cert_id or "").strip():
+        raise ValueError("App Connector Group requires the resolved enrollment certificate ID")
     if dry_run:
         print(f"   [DRY-RUN] Would create App Connector Group: name='{name}', location='{city}, {country}'")
         return "dry-run-group-id-123"
@@ -199,6 +201,9 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
 
     payload = {
         "name": name,
+        # The API calls this signingCertId in validation errors, but the
+        # request field is enrollmentCertId (also required on the group).
+        "enrollmentCertId": str(enrollment_cert_id),
         "description": f"Auto-created for {name}",
         "enabled": True,
         "cityCountry": location_str,
@@ -356,7 +361,7 @@ def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, z
     # Use site name for the group name
     group_name = site_name
     
-    group_id = create_app_connector_group(zpa_base, customer_id, token, group_name, city, country, dry_run=dry_run)
+    group_id = create_app_connector_group(zpa_base, customer_id, token, group_name, city, country, dry_run=dry_run, enrollment_cert_id=enrollment_cert_id)
     if not group_id:
         print(f"❌ Failed to create App Connector Group", file=sys.stderr)
         return False

@@ -6,7 +6,7 @@ Use the main deployment workflow to create ZPA App Connector resources for selec
 
 For each selected new site with `appc_provision=1`, the deployment engine:
 
-1. Creates an App Connector Group named after the site.
+1. Creates an App Connector Group named after the site, using its city/country and the configured enrollment certificate.
 2. Creates a provisioning key with the site name, that group, the configured enrollment certificate, and maximum usage of 2.
 3. Attaches the provisioning key to the ZTB cluster.
 
@@ -27,7 +27,7 @@ ZPA_ENROLLMENT_CERT_NAME="Connector"
 ZPA_BASE_URL="https://config.private.zscaler.com"
 ```
 
-Use the base URL for your ZPA cloud. The example is not a universal endpoint. `ZPA_CUSTOMER_ID` may be omitted if the authentication token supplies `custId`; an explicitly configured customer ID is checked against the token when available. The certificate name defaults to `Connector` but can be changed.
+Use the base URL for your ZPA cloud. The example is not a universal endpoint. `ZPA_CUSTOMER_ID` may be omitted if the authentication token supplies `custId`; an explicitly configured customer ID is checked against the token when available. The certificate name defaults to `Connector` but can be changed. The integration resolves that name once during preflight and supplies the same certificate ID to both the group and provisioning key; no additional credential or certificate setting is needed.
 
 Both ZTB and ZPA use the selected `--env-file`; environment variables take precedence. Authentication can update tokens in that file. Do not share or commit it.
 
@@ -71,7 +71,7 @@ Read the short report under `out/runs/` and inspect the `ZPA` stage in its JSON 
 - Groups and keys are not automatically reused or rolled back after failure. Inspect resources before repair; rerunning site creation will stop at the existing-site check.
 - The current country mapping defaults unrecognized values to `NL`. Review the country settings before deploying outside the supported mappings in `zpa_provisioning.py`.
 - Group creation attempts OpenStreetMap geocoding using the site city and country. Lookup failures fall back to coordinates `0,0`.
-- HA and ZPA workflows need broader live validation. Offline tests do not establish connector readiness.
+- A fresh standalone Netherlands site has passed group/key creation and ZTB key attachment in a single deployment run. Appliance registration after activation and HA still need live validation. Offline tests do not establish connector readiness.
 - The integration provisions App Connector resources; it does not configure security policies.
 
 [Return to the setup guide](readme.md)
