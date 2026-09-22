@@ -16,12 +16,16 @@ venv/
 
 # Env vars
 .env
+.env.*
+!.env.example
+*.env
 
 # Local output
 vlan/*.json
 out/
 archive/
 
-# Local working files and test directory
+# Local working files
 sites.csv
-tests/
+/vlans/
+.~lock.*#

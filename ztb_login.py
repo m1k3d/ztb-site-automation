@@ -11,61 +11,10 @@ Supports both:
   • Programmatic use via `ztb_login(write_env=True, quiet=False)`
 """
 
-from __future__ import annotations
 import datetime as dt
-import json
-import os
-import re
-import sys
-from pathlib import Path
 from typing import Optional, Tuple
-
 import requests
-
-# Optional: load from .env if present (non-fatal if missing)
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv(override=False)
-except Exception:
-    pass
-
-ENV_PATH = Path(".env")
-
-
-def get_env(name: str, *, required: bool = True) -> Optional[str]:
-    """Fetch env var, optionally requiring it."""
-    v = os.getenv(name)
-    if required and not v:
-        print(f"❌ Missing {name} (set it in .env or your environment)", file=sys.stderr)
-        sys.exit(2)
-    return v
-
-
-def upsert_env_var(key: str, value: str) -> None:
-    """Upsert KEY="value" in .env (create file if missing)."""
-    text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
-    pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
-    line = f'{key}="{value}"'
-    if pattern.search(text):
-        text = pattern.sub(line, text)
-    else:
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += line + "\n"
-    ENV_PATH.write_text(text, encoding="utf-8")
-
-
-def normalize_base(raw: str) -> str:
-    """
-    Normalize ZTB API base:
-      https://<tenant>-api.goairgap.com[/api/v3[/]]
-    → https://<tenant>-api.goairgap.com
-    """
-    base = (raw or "").strip().rstrip("/")
-    if base.endswith("/api/v3"):
-        base = base[: -len("/api/v3")]
-    return base
-
+from automation_config import Settings, normalize_base, write_tokens
 
 def parse_expiry_fields(result: dict) -> Tuple[Optional[str], Optional[int]]:
     """
@@ -100,56 +49,46 @@ def parse_expiry_fields(result: dict) -> Tuple[Optional[str], Optional[int]]:
     return iso, seconds
 
 
-def ztb_login(write_env: bool = True, quiet: bool = False) -> Tuple[str, Optional[str]]:
+def ztb_login(write_env: bool = True, quiet: bool = False, *, config: Optional[Settings] = None) -> Tuple[str, Optional[str]]:
     """
     Authenticate to ZTB API and return (token, iso_expiry).
 
     If write_env=True, updates .env with BEARER and BEARER_EXPIRES_AT.
     If quiet=True, suppresses console output.
     """
-    base_raw = (os.getenv("ZTB_API_BASE") or os.getenv("ZIA_API_BASE") or "").strip()
-    if not base_raw:
-        raise SystemExit("❌ Missing ZTB_API_BASE (or legacy ZIA_API_BASE). Set it in .env")
-    api_key = get_env("API_KEY")
-
-    base = normalize_base(base_raw)
+    config = config or Settings.load()
+    if not config.api_key:
+        raise ValueError("API_KEY: required to obtain or refresh a ZTB token")
+    base = normalize_base(config.ztb_api_base)
     url = f"{base}/api/v3/api-key-auth/login"
 
     try:
         resp = requests.post(
             url,
             headers={"Content-Type": "application/json"},
-            json={"api_key": api_key},
+            json={"api_key": config.api_key},
             timeout=30,
         )
         resp.raise_for_status()
-    except requests.HTTPError as e:
-        try:
-            body = json.dumps(resp.json(), indent=2)
-        except Exception:
-            body = (getattr(resp, "text", "") or "")[:800]
-        raise SystemExit(f"❌ Auth failed ({resp.status_code}) at {url}\nResponse:\n{body}") from e
-    except Exception as e:
-        raise SystemExit(f"❌ Request error calling {url}: {e}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"ZTB authentication failed at {url}; check API_KEY and tenant URL") from e
 
     try:
         data = resp.json()
         result = data["result"]
         token = result["delegate_token"]
-        if not token:
+        if not isinstance(token, str) or not token.strip():
             raise KeyError("empty token")
-    except Exception:
-        raise SystemExit(f"❌ Unexpected JSON shape:\n{json.dumps(resp.json(), indent=2)}")
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeError("ZTB authentication response is missing result.delegate_token") from None
 
     iso_exp, seconds = parse_expiry_fields(result)
 
     if write_env:
-        upsert_env_var("BEARER", token)
-        if iso_exp:
-            upsert_env_var("BEARER_EXPIRES_AT", iso_exp)
+        write_tokens(config.env_path, {"BEARER": token, "BEARER_EXPIRES_AT": iso_exp})
 
     if not quiet:
-        where = str(ENV_PATH.resolve()) if write_env else "(not written)"
+        where = str(config.env_path) if write_env and config.env_path else "(not written)"
         print(f"✅ ZTB token retrieved")
         print(f"   • API base  : {base}")
         print(f"   • .env file : {where}")
@@ -160,6 +99,19 @@ def ztb_login(write_env: bool = True, quiet: bool = False) -> Tuple[str, Optiona
     return token, iso_exp
 
 
-if __name__ == "__main__":
-    token, exp = ztb_login(write_env=True, quiet=False)
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Obtain a ZTB bearer token")
+    parser.add_argument("--env-file", default=".env")
+    args = parser.parse_args(argv)
+    try:
+        token, _ = ztb_login(config=Settings.load(args.env_file))
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f'export BEARER="{token}"')
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

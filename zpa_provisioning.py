@@ -6,13 +6,13 @@ zpa_provisioning.py
 - Configures ZTB sites with the generated keys
 """
 
-import os
 import sys
 import json
 import requests
 import base64
 from typing import Dict, Any, Optional, Tuple
-from urllib.parse import urlparse
+from dataclasses import dataclass, field
+from automation_config import Settings, normalize_base
 
 # Import zpa_login to ensure we can get a token
 try:
@@ -68,7 +68,7 @@ def get_enrollment_cert_id(base_url: str, customer_id: str, token: str, cert_nam
             resp.raise_for_status()
             
             data = resp.json()
-            certs = data.get("list", []) or data
+            certs = data.get("list", []) if isinstance(data, dict) else data
             
             if not isinstance(certs, list):
                 continue
@@ -78,10 +78,7 @@ def get_enrollment_cert_id(base_url: str, customer_id: str, token: str, cert_nam
                 if cert.get("name", "").lower() == cert_name.lower():
                     return cert.get("id")
             
-            # If not found, return the first one as fallback
-            if certs:
-                print(f"   ⚠️  Certificate '{cert_name}' not found, using: {certs[0].get('name')}", file=sys.stderr)
-                return certs[0].get("id")
+            # A named certificate is a requirement, not a suggestion.
             
         except Exception as e:
             if "404" not in str(e):
@@ -169,30 +166,6 @@ def get_geo_location(city: str, country: str) -> Tuple[str, str]:
 
 
 
-def _normalize_zpa_base_url(raw: str) -> str:
-    """
-    Normalize env input to a config host URL.
-    """
-    value = (raw or "").strip().strip('"').strip("'")
-    if not value:
-        return ""
-    if "://" not in value:
-        value = f"https://{value}"
-
-    parsed = urlparse(value)
-    host = (parsed.netloc or "").strip().strip("/")
-    if not host:
-        return ""
-
-    host = host.split("/", 1)[0]
-    if host.lower().startswith("api."):
-        host = "config." + host[4:]
-    elif not host.lower().startswith("config."):
-        host = "config." + host
-
-    scheme = parsed.scheme or "https"
-    return f"{scheme}://{host}"
-
 def create_app_connector_group(base_url: str, customer_id: str, token: str, name: str, city: str, country: str, dry_run: bool = False) -> Optional[str]:
     """
     Creates an App Connector Group using the standard mgmtconfig endpoint.
@@ -203,7 +176,7 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
         return "dry-run-group-id-123"
 
     # Use mgmtconfig endpoint (usually on config.<cloud>)
-    # standard base_url from _normalize_zpa_base_url is already config.<cloud>
+    # Shared configuration normalizes base_url to config.<cloud>.
     url = f"{base_url}/mgmtconfig/v1/admin/customers/{customer_id}/appConnectorGroup"
     headers = get_zpa_headers(token)
     
@@ -328,7 +301,34 @@ def update_ztb_site_zpa(ztb_session: requests.Session, ztb_api_base: str, cluste
         print(f"❌ Error updating ZTB Cluster: {e}", file=sys.stderr)
         return False
 
-def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, ztb_api_base: str, cluster_id: int, dry_run: bool = False) -> bool:
+@dataclass(frozen=True)
+class ZPAContext:
+    base_url: str
+    customer_id: str
+    token: str = field(repr=False)
+    enrollment_cert_id: str
+
+
+def prepare_zpa(config: Settings) -> ZPAContext:
+    """Authenticate and resolve requirements without creating groups or keys."""
+    errors = config.errors(require_ztb=False, require_zpa=True)
+    if errors:
+        raise ValueError("; ".join(errors))
+    token, _ = zpa_login.zpa_login(config=config, write_env=True, quiet=True)
+    base = normalize_base(config.zpa_base_url, zpa=True)
+    token_customer = get_customer_id(token)
+    if config.zpa_customer_id and token_customer and config.zpa_customer_id != token_customer:
+        raise ValueError("ZPA_CUSTOMER_ID does not match the authenticated token customer")
+    customer_id = config.zpa_customer_id or token_customer
+    if not customer_id:
+        raise ValueError("ZPA_CUSTOMER_ID: required when the token has no custId")
+    certificate = get_enrollment_cert_id(base, customer_id, token, config.zpa_enrollment_cert_name)
+    if not certificate:
+        raise ValueError(f"ZPA_ENROLLMENT_CERT_NAME: could not resolve '{config.zpa_enrollment_cert_name}'")
+    return ZPAContext(base, customer_id, token, certificate)
+
+
+def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, ztb_api_base: str, cluster_id: int, dry_run: bool = False, *, config: Optional[Settings] = None, context: Optional[ZPAContext] = None) -> bool:
     """
     Main orchestrator function for a single site row.
     """
@@ -339,35 +339,14 @@ def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, z
 
     print(f"🚀 Starting ZPA Provisioning for {site_name}...")
 
-    # 1. Get ZPA Token
-    # We assume zpa_login can be called or we have env vars.
-    # Let's try to refresh/get token using zpa_login logic
+    # The engine resolves requirements for the whole batch before creating sites.
     try:
-        token, _ = zpa_login.zpa_login(write_env=True, quiet=True)
-    except Exception as e:
-        print(f"❌ ZPA Login failed: {e}", file=sys.stderr)
+        context = context or prepare_zpa(config or Settings.load())
+    except Exception as exc:
+        print(f"ZPA preflight failed: {exc}", file=sys.stderr)
         return False
-
-    zpa_base = _normalize_zpa_base_url(os.getenv("ZPA_BASE_URL", ""))
-    if not zpa_base:
-        print(
-            "❌ Missing or invalid ZPA_BASE_URL "
-            "(expected e.g. 'https://config.private.zscaler.com' or 'private.zscaler.com')",
-            file=sys.stderr,
-        )
-        return False
-
-    # 2. Get Customer ID
-    customer_id = get_customer_id(token)
-    if not customer_id:
-        return False
-
-    # 3. Get Enrollment Cert ID
-    cert_name = os.getenv("ZPA_ENROLLMENT_CERT_NAME", "Connector")
-    enrollment_cert_id = get_enrollment_cert_id(zpa_base, customer_id, token, cert_name)
-    if not enrollment_cert_id:
-        print(f"❌ Failed to get enrollment certificate ID", file=sys.stderr)
-        return False
+    zpa_base, customer_id = context.base_url, context.customer_id
+    token, enrollment_cert_id = context.token, context.enrollment_cert_id
 
     # 4. Create App Connector Group (with location)
     # Extract city/country from row, defaulting if missing
@@ -389,7 +368,7 @@ def provision_zpa_for_site(row: Dict[str, str], ztb_session: requests.Session, z
     if not prov_key:
         return False
     
-    print(f"   🔑 Generated ZPA Key: {prov_key[:10]}...")
+    print("   🔑 Generated ZPA Key (redacted)")
 
     # 6. Update ZTB (No need to look up site_id anymore, we use cluster_id passed in)
     return update_ztb_site_zpa(ztb_session, ztb_api_base, cluster_id, site_name, prov_key, dry_run=dry_run)

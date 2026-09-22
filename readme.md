@@ -1,288 +1,188 @@
-# 🧠 ZTB Site Automation
-**Automate (Zscaler ZTB) site creation and VLAN provisioning — API-driven, reliable, and HA-aware.**
+# ZTB Site Automation
 
-Author: **Mike Dechow (@m1k3d)**  
-Repo: [github.com/m1k3d/ztb-site-automation](https://github.com/m1k3d/ztb-site-automation)  
-License: MIT  
-Version: 1.6.1
+Create Zscaler Zero Trust Branch sites from CSV files, with VLANs, private DNS, HA/VRRP, and optional ZPA App Connector provisioning. Use an existing site as a reference, prepare a batch of new branches, validate the inputs, and deploy with per-site results.
 
----
+Maintained by [Mike Dechow](https://github.com/m1k3d) · [Repository](https://github.com/m1k3d/ztb-site-automation)
 
-## 🚀 Overview
+**Current delivery:** a Python command-line application. The browser UI and packaged desktop application are planned; they are not included in this repository yet.
 
-This automation suite is designed to **rapidly deploy Zscaler ZTB sites** — including VLANs, HA pairs, and template-based configurations — using a CSV-driven workflow.  
-It mirrors the same behavior and API calls used by the ZTB UI, but at **scale**.
+[Setup](#setup) · [Deploy your first batch](#deploy-your-first-batch) · [Reports](#reports-and-exit-codes) · [Troubleshooting](#troubleshooting) · [Configuration reference](docs/configuration.md) · [Development](docs/development.md)
 
-### ✨ Key Capabilities
+## What it does
 
-- **Create sites** using Jinja2-templated payloads derived from a reference site.  
-- **Deploy VLANs** in bulk with DHCP, DNS, and zone metadata.  
-- **Supports both Standalone and HA** gateway architectures.  
-- **Template resolution** (by name → ID) for dynamic site creation.  
-- **Post-provision actions**: VLAN enablement, share-over-VPN, DHCP service patching.  
-- **VRRP auto-configuration** — dynamically identifies HA, WAN, and LAN interfaces.  
-- **Private DNS Configuration** — automatically adds sites to "System-Private-DNS-Servers-Group".
-- **ZPA Provisioning** — automatically creates App Connector Groups and Provisioning Keys.
-- **Dry-run and Debug** modes for safe validation.  
+- Creates standalone or HA sites using templates from your tenant.
+- Provisions VLANs, private DNS, and HA VRRP; optionally creates and attaches ZPA App Connector provisioning resources.
+- Validates selected CSV rows before deployment and offers an authenticated preview.
+- Stops an existing site from being recreated or modified by a sequential rerun.
+- Saves a short text report and structured JSON for deployment and preview runs.
 
----
+The tool creates configuration. Successful API calls do **not** confirm appliance activation, interface binding, or traffic connectivity. Automatic recovery, rollback, and updates to existing sites are not implemented. See [current limitations](#current-limitations).
 
-## 🧩 Directory Layout
+## Before you begin
 
-**Project root (`ztb-site-automation/`):**
-- `bulk_create.py` — Creates sites, VLANs, and applies VRRP  
-- `pull_site.py` — Pulls a site configuration from the API into sites.csv and VLAN CSVs  
-- `vlans_convert.py` — Converts VLAN API output ↔ CSV format for editing or comparison  
-- `ztb_login.py` — Authenticates and exports the BEARER token automatically to .env  
-- `site_template.json.j2` — Jinja2 site creation template (used by bulk_create.py)  
-- `sites.csv` — Master CSV with one row per site (includes template, WAN, and VLAN references)  
-- `vlans/` — Folder containing VLAN definitions per site (e.g., `Manufacturing-Site.csv`)  
-- `.env` — Environment variables (tenant API URL, BEARER token, and optional referer path)  
+You need:
 
-**Optional folders (recommended):**
-- `logs/` — Stores execution logs, debug traces, and run summaries  
-- `archive/` — Keeps historical VLAN CSVs or site exports for version tracking  
-- `examples/` — Contains sample templates, CSVs, and example payloads for reference  
+- Python 3.11 or newer and network access to your tenant API.
+- A ZTB tenant URL and an API key with access to the required operations.
+- A ZTB site template matching your appliance model and standalone/HA design.
+- The zones referenced by your VLAN files, already created in the tenant.
+- Site and gateway names and network addressing for the new branches.
 
----
+A working reference site is the easiest starting point. Optional ZPA provisioning also requires [ZPA credentials and an enrollment certificate](ZPA_PROVISIONING_README.md).
 
-## ⚙️ Before You Begin
+## Setup
 
-Before using the automation, set up your environment and your **reference template**.
+Download or clone this repository, open a terminal in its directory, and install the dependencies in a virtual environment.
 
-### 1️⃣ Create a Reference Template in the UI
-
-1. Log in to **Zscaler ZTB**.  
-2. Create a new **template** for your branch site type.  
-3. Configure base values such as:
-   - DNS servers  
-   - DHCP service mode (Server or Relay)  
-   - Default WAN/LAN zones  
-   - Gateway model and interface layout  
-4. Save and note your **Template Name**.  
-
-> 💡 **Tip:** Name templates consistently, e.g. `Branch-HA` or `Single-Gateway`.
-
----
-
-### 2️⃣ Create Zones
-
-Before you create your reference site, make sure the necessary zones exist.
-
-1. In the **ZTB UI**, go to:  
-   **Resources → Objects → Add → Zone**
-2. Create zones for each traffic type you plan to reference in VLAN CSVs — for example:
-   - LAN Zone  
-   - IoT Zone  
-   - Guest Zone  
-   - Voice Zone  
-3. These zone names must exactly match the names you reference in your VLAN CSVs.
-
-> ⚠️ **Note:** Zone names are case-sensitive and must match exactly in your automation CSVs.
-
----
-
-### 3️⃣ Create a Reference Site
-
-1. In the ZTB UI, create a **site** using your chosen template.  
-2. Populate **all mandatory fields** (WAN IPs, DHCP relay IP, DNS, etc.).  
-3. Once deployed, this becomes your **reference site** — one you can easily replicate for future branches.
-
-> 🧩 **Example:**  
-> Use this reference site as a base for other locations that share a similar VLAN architecture.  
-> For example, if VLAN 10 at the reference site uses `172.16.10.0/24`, you might configure a new site with the same structure but shift the addressing pattern (e.g., `172.17.10.0/24`) to maintain consistency.
-
----
-
-### 4️⃣ Prepare Environment Variables (`.env`)
+**macOS / Linux**
 
 ```bash
-# 🔐 Environment Setup (.env)
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 bulk_create.py --csv examples/sites.csv --validate-only
+```
 
-ZTB_API_BASE="https://<tenant>-api.goairgap.com/api/v3"
-API_KEY="CREATE IN UI"
+**Windows PowerShell**
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe bulk_create.py --csv examples/sites.csv --validate-only
+```
+
+For the remaining commands, Windows users should replace `python3` with `.\.venv\Scripts\python.exe`.
+
+The example check runs offline, needs no credentials, and should print:
+
+```text
+Validated 1 selected site(s), 1 VLAN(s).
+```
+
+The example contains placeholder template, interface, zone, and address values. It is for validation practice; adapt it to your tenant before deployment.
+
+Create a local `.env` by copying `.env.example` if you do not already have one. Set:
+
+```dotenv
+ZTB_API_BASE="https://<your-tenant>-api.goairgap.com/api/v3"
+API_KEY="<your-api-key>"
 BEARER="AUTO_POPULATED"
+```
 
-# See ZPA_PROVISIONING_README.md for ZPA-specific variables
+The scripts obtain and refresh the bearer token automatically. You do not need to run a separate login command. Existing environment variables take precedence over `.env`; use `--env-file path/to/tenant.env` to select another credential file. Keep credentials and real tenant exports out of version control.
 
-💡 Note:
-The BEARER value is automatically generated and updated by ztb_login.py when you first run any script.
-You do not need to manually edit or export environment variables — everything is handled automatically.
+## Deploy your first batch
 
-⸻
+### 1. Export a reference site
 
-🔁 How Authentication Works
-	•	If no valid BEARER token exists in .env, the script automatically runs:
+List the available sites, then export the one you want to copy:
 
-python3 ztb_login.py
+```bash
+python3 pull_site.py
+python3 pull_site.py --site-name "Branch-Reference"
+```
 
+The export updates `sites.csv` and writes `vlans/Branch-Reference.csv` and `.json` beside the scripts. It sets the exported site to `post=0`, so the reference is not selected for deployment. Pulling the same site again refreshes local exports; it does not change the tenant.
 
-	•	It fetches a new token and updates .env.
-	•	The updated .env is reloaded automatically.
-	•	If any API call returns 401 Unauthorized, the script re-authenticates once and retries.
-	•	All scripts (pull_site.py, bulk_create.py, etc.) support this behavior natively.
+### 2. Prepare the new branches
 
-⸻
+In `sites.csv`:
 
-🧠 Step-by-Step Workflow
+1. Duplicate the reference row for each new branch; leave the original at `post=0`.
+2. Assign unique site and gateway names.
+3. Review the template, WAN settings, DNS, country, and ZIA location choice. For a separate ZIA location, use `location_type=new` and a new `zia_location_name`.
+4. Copy the VLAN CSV for each branch that needs different networks, adjust its addressing, and update `vlans_file`.
+5. Set `post=1` only on the rows you intend to create.
 
-1️⃣ Pull Your Reference Site
+Relative `vlans_file` paths are resolved from the directory containing the site CSV. Exported data needs review: location defaults and older interface/DHCP settings are not guaranteed to be suitable for a new deployment.
 
-Use pull_site.py to extract your reference site configuration and VLANs.
+For WAN DHCP, leave the WAN address, mask, and gateway blank. For static WAN addressing, fill all three. See the [site and VLAN field reference](docs/configuration.md) for HA, location choices, DHCP modes, and optional settings.
 
-python3 pull_site.py --site-name "<Your Reference Site Name>" --include-wans
+### 3. Validate and preview
 
-Arguments:
+```bash
+python3 bulk_create.py --csv sites.csv --validate-only
+python3 bulk_create.py --csv sites.csv --dry-run
+```
 
-Flag	Description
---site-name	Site name to pull from API
---include-wans	Include WAN interface info in output
---list-templates	(Optional) List all available templates
---list-locations    (Optional) List all ZIA locations and IDs
---debug	Verbose API output
+| Mode | What happens |
+| --- | --- |
+| `--validate-only` | Checks selected site/VLAN inputs locally. No authentication or network requests. |
+| `--dry-run` | Resolves tenant references, checks for existing sites, and performs optional ZPA preflight. May refresh tokens, but creates no deployment resources. |
+| No mode flag | Performs the checks, then deploys the selected new sites. |
 
-Creates:
-	•	sites.csv → one row for your reference site
-	•	<site name>.csv → VLAN configuration in vlans directory
+Fix validation and preview errors before proceeding. Preview does not prove that every API call or interface binding will succeed; device readiness and some interface checks are only evaluated during deployment.
 
-⸻
+Input validation and template/location resolution cover the whole selected batch before deployment writes. A preflight error blocks the batch. Once execution begins, a failure or existing-site stop affects that site; later sites can still proceed.
 
-2️⃣ Prepare sites.csv
+### 4. Deploy and review
 
-Edit the generated sites.csv and create additional rows for each site you want to deploy.
+```bash
+python3 bulk_create.py --csv sites.csv
+```
 
-site_name,country,template_name,template_id,gateway_name,gateway_name_b,wan0_ip,wan0_mask,wan0_gw,wan_interface_name,wan1_ip,wan1_mask,wan1_gw,wan1_interface_name,dhcp_server_ip,wan_dns,private_dns,zia_location_name,location_type,location_template_name,location_template_id,vlans_file,post,appc_provision
-Amsterdam,Netherlands,Branch-HA,,BRANCH-A-GW-A,BRANCH-A-GW-B,192.0.2.10,255.255.255.252,192.0.2.9,ge3,198.51.100.10,255.255.255.252,198.51.100.9,ge4,10.0.0.1,"1.1.1.1,8.8.8.8","10.0.0.5,10.0.0.6",Amsterdam,new,Default Location Template,,vlans_amsterdam.csv,1,1
+Read the per-site results and run report, then verify configuration in the Zscaler console. After appliance activation, verify interface bindings and connectivity separately. Set completed rows back to `post=0` to keep later batches focused on new work.
 
-	•	post=1 marks which rows to deploy.
-	•	Use template_name (preferred) or template_id.
-	•	template_id is automatically resolved if you provide template name (you can leave this cell blank).
-	•	DHCP relay IPs must be defined when required by the template.
-	•	`location_type` mirrors the current Add Site UI: `new`, `existing`, or `none`.
-	•	`new` creates `zia_location_name` and resolves `location_template_name` to its tenant-specific ID automatically.
-	•	`location_template_name` defaults to `Default Location Template`; set a different human-readable name when needed.
-	•	`location_template_id` remains available as an optional override, but normally stays blank.
-	•	Location-template settings belong in `sites.csv`. The script does not read `ZIA_LOCATION_TEMPLATE_NAME` or `ZIA_LOCATION_TEMPLATE_ID` from `.env`; remove these if you added them previously.
-	•	`new` requires `country`. Template names resolve through `GET /api/v3/settings/location_templates`; the resulting ID is sent as `location.location_template_id`, alongside `location.details`.
-	•	`existing` resolves `zia_location_name` and fails safely if the location does not exist.
-	•	`none` deploys the site without associating a ZIA location.
-	•	Blank or `auto` preserves the earlier behavior: reuse a matching `zia_location_name`; otherwise create a new location using the named Location Template.
+## Reports and exit codes
 
-The new-location endpoint and payload structure were verified against a successful browser request. Existing and none modes have local regression coverage but were not captured in that workflow. `pull_site.py` uses `auto` and the default location template for newly exported rows; those defaults do not describe the original site's creation settings. Existing CSV location choices and custom columns are preserved on re-export.
+Runs that reach the deployment engine save reports under **`out/runs/`**, relative to your working directory:
 
-Run local regression checks with `python3 -m unittest discover -s tests -v`. Tests use fixture responses and never deploy sites. A dry run still uses authenticated API lookups, but does not deploy a site.
+```text
+out/runs/
+  <UTC-timestamp>-<run-id>.txt
+  <UTC-timestamp>-<run-id>.json
+```
 
-⸻
+Read the `.txt` for the outcome and next action. Use the `.json` for site statuses and stage results. Reports exclude credentials, request payloads, and raw API responses; detailed error messages remain in the console output.
 
-3️⃣ Prepare VLAN CSVs
+To choose another location:
 
-Each site references a VLAN CSV file.
-Duplicate your pulled VLAN CSV (from the reference site) and adjust as needed.
+```bash
+python3 bulk_create.py --csv sites.csv --report-dir out/customer-rollout
+```
 
-name,tag,subnet,default_gateway,dhcp_start,dhcp_end,interface,zone,enabled,share_over_vpn,dhcp_service
-10-Users,10,10.10.10.0/24,10.10.10.1,10.10.10.100,10.10.10.150,ge5,LAN Zone,true,false,inherit
-20-IoT,20,10.20.20.0/24,10.20.20.1,10.20.20.10,10.20.20.50,ge6,IoT Zone,true,true,non_airgapped
+| Site status | Meaning / next action |
+| --- | --- |
+| `success` | Requested API stages completed; verify the appliance separately. |
+| `preview` | Preview completed without deploying resources. |
+| `already_exists` | The site was left unchanged. A rerun does not repair it. |
+| `lookup_failed` | Site existence could not be established; no changes were made to that site. |
+| `partial` | The site was created, but configuration is incomplete. Inspect failed stages before repair. |
+| `failed` | Creation failed or its outcome is uncertain. Inspect the tenant before retrying. |
 
+Exit code **0** means no reported failure, including a no-op with no selected rows. **1** includes validation errors, existing-site stops, lookup failures, and incomplete deployments. **130** means the run was interrupted.
 
-⸻
+Validation-only runs, unselected batches, and failures before the engine starts do not create reports. An interrupted or unexpectedly terminated run can leave a JSON report marked `started`; this is not evidence that no changes occurred.
 
-4️⃣ Run the Automation
+## Current limitations
 
-Dry Run (Validation Only):
+- **Recovery:** no automatic resume or rollback. Successful stages remain after a later failure. An existing-site stop prevents full recreation but does not complete missing stages.
+- **Inventory size:** duplicate detection does not yet paginate. If the first page of up to 100 records cannot establish absence, creation is blocked. Reference listing/export is also limited to its first inventory page.
+- **Concurrent runs:** duplicate checks protect sequential reruns, not two simultaneous creators. Coordinate deployments to the same tenant.
+- **Coverage:** standalone creation, private DNS, VLAN provisioning, and existing-site stops have live test coverage. HA and ZPA have offline coverage but still need broader live validation. IPv6 is not supported.
 
-python3 bulk_create.py --dry-run
+## Troubleshooting
 
-Full Deployment:
+| Message or symptom | Action |
+| --- | --- |
+| Nothing selected | Set `post=1` on the intended new-site rows. |
+| Validation error with file, row, and field | Correct that field and rerun `--validate-only`. DHCP ranges must exclude the gateway address. |
+| Template or location name cannot be resolved | List tenant templates/locations and check the spelling or explicit ID override. |
+| Already exists | Inspect the existing site. Do not rename it merely to bypass duplicate protection. |
+| Existence lookup failed | Check credentials, tenant access, and inventory size. No creation was attempted for that site. |
+| Loopback subnet or interface validation fails | Use `/32`, disable DHCP, and verify that each target gateway exposes `lo0`. See the [configuration requirements](docs/configuration.md#loopback-management-lo0). |
+| Partial result, timeout, or interrupted run | Read the report and inspect the tenant before another deployment. Completed resources are not rolled back. |
 
-python3 bulk_create.py
+Use `--debug` for HTTP request/status diagnostics. Review console output before sharing it; reports intentionally omit raw API responses.
 
-Debug Mode:
+## Command reference
 
-python3 bulk_create.py --debug
-
-
-⸻
-
-5️⃣ Post-Deployment Behavior
-
-After each site is created:
-	1.	The script polls /api/v3/Gateway until gateway and cluster IDs appear.
-	2.	VLANs are POSTed via /api/v2/Network/.
-	3.	VLANs are enabled (status = provisioned).
-	4.	VRRP configuration is automatically applied:
-	•	HA link inferred from the template’s HA interface.
-	•	LAN and WAN tracking inferred from the CSVs.
-	•	Uses a fixed virtual_router_id = 16 defined in code (no .env variable required).
-	5.	Optional flags (share_over_vpn, dhcp_service) are patched post-deploy.
-
-⸻
-
-🧱 File Reference
-
-File	Description
-bulk_create.py	Creates sites, VLANs, and applies VRRP
-pull_site.py	Extracts an existing site and its VLANs
-vlans_convert.py	Converts raw VLAN JSON to human-readable CSV
-ztb_login.py	Retrieves API bearer token automatically
-site_template.json.j2	Jinja2 template defining payload structure
-sites.csv	Source of truth for site creation
-vlan_.csv	VLAN definitions per site
-.env	Tenant API configuration
-
-
-⸻
-
-💡 Best Practices
-
-✅ Validate all templates in the UI before automating
-✅ Maintain consistent naming conventions
-✅ Use dry-run before live deployments
-✅ Version-control your CSVs and templates
-✅ Keep .env minimal — only core variables (no VRRP or experimental fields)
-
-⸻
-
-🧩 Example Workflow Summary
-	1.	Create zones in Resources → Objects → Add → Zone
-	2.	Create template in UI → with DHCP/DNS preconfigured
-	3.	Create reference site → verify VLAN and WAN setup
-	4.	Run pull_site.py → export site and VLAN configs
-	5.	Duplicate and edit sites.csv → one row per site
-	6.	Duplicate VLAN CSVs → per site or site type
-	7.	Run bulk_create.py → sit back and watch automation magic
-	8.	Validate in ZTB UI → confirm sites, VLANs, and VRRP applied
-
-⸻
-
-🏁 Example Commands Recap
-
-# Pull a reference site
-python3 pull_site.py --site-name "Branch-Reference" --include-wans
-
-# List ZIA Locations (to find existing names for sites.csv)
+```bash
+python3 bulk_create.py --help
+python3 pull_site.py --help
+python3 pull_site.py --list-templates
 python3 pull_site.py --list-locations
+python3 -m unittest discover -s tests -v
+```
 
-# Create multiple new sites (dry run)
-python3 bulk_create.py --dry-run
-
-# Deploy for real
-python3 bulk_create.py
-
-
-⸻
-
-🧰 Troubleshooting Tips
-
-Symptom	Likely Cause	Fix
-Missing template_id	Template not specified or typo in name	Add template_name or ID
-Gateway/cluster not ready	API delay after site creation	Increase retries in bulk_create.py
-VLAN ERR 400	Duplicate VLAN tag or HA VLAN conflict	Exclude HA VLANs during pull
-VRRP 405 or 500	Interface mapping incomplete	Ensure HA and tracked interfaces resolved properly
-VLANs not visible	Template missing zone mapping	Check UI template config
-
-
-⸻
-
-🧭 License
-
-This project is licensed under the MIT License — feel free to modify and extend it for your own organization.
+Further documentation: [Configuration and export reference](docs/configuration.md) · [Optional ZPA provisioning](ZPA_PROVISIONING_README.md) · [Architecture and offline checks](docs/development.md)

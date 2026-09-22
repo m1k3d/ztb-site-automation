@@ -22,129 +22,37 @@
 #                   because they’re auto-provisioned during site creation and not editable.
 #   - Updates or inserts site row into sites.csv for bulk_create.py
 #   - Supports HA by adding optional *_b / wan1_* fields when a second gateway is present
-#   - **Templates:** `--list-templates` shows name/deployment_type/platform_type/id. Keep template_id blank;
-#                   bulk_create resolves ID from template_name at runtime.
+#   - **Templates:** `--list-templates` shows name/deployment_type/platform_type/id.
+#                   Exports use template_name; bulk_create resolves its ID at runtime.
 #
 #   - **Auth QoL (single-run)**:
-#       · If BEARER is missing, we call `ztb_login.py`, reload .env, and build the session with the new token.
-#       · If any request returns 401 once, we call `ztb_login.py`, update the session header, and retry ONCE.
+#       · The shared client obtains a missing BEARER through the login function.
+#       · On HTTP 401, it refreshes the session token and retries ONCE.
 #       · Messages are visible (no hidden background behavior).
 
-import os, sys, json, csv, argparse, pathlib, subprocess, tempfile
+import os, sys, json, csv, argparse, pathlib, tempfile
 from typing import Any, Dict, List, Optional, Tuple
 import requests
+import ipaddress
 
 # ------------------------
 # Paths
 # ------------------------
 ROOT = pathlib.Path(__file__).resolve().parent
 OUT_VLANS_DIR = ROOT / "vlans"
-OUT_VLANS_DIR.mkdir(exist_ok=True)
 CSV_PATH = ROOT / "sites.csv"
-LOGIN_SCRIPT = ROOT / "ztb_login.py"
+# Shared settings are loaded only when main() runs, never during import.
+from automation_config import Settings
+from api_client import ZTBClient
 
-# ------------------------
-# tiny .env loader (no extra deps)
-# ------------------------
-def load_env_file(path: str = ".env"):
-    p = pathlib.Path(path)
-    if not p.exists():
-        return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        # allow refresh/overwrite after ztb_login.py runs
-        os.environ[k] = v
+client = None
+BASE_V3 = BASE_V2 = ORIGIN = REFERER = ""
 
-load_env_file(".env")
 
-# ------------------------
-# Env / session
-# ------------------------
-def _normalize_base_root(raw: str) -> str:
-    """Accept root or /api/v3|v2 and return clean ROOT (no trailing slash, no /api/*)."""
-    base = (raw or "").strip().rstrip("/")
-    if base.endswith("/api/v3") or base.endswith("/api/v2"):
-        base = base.rsplit("/api/", 1)[0]
-    return base
-
-def _invoke_login() -> bool:
-    """Run ztb_login.py and reload .env. Return True if BEARER is now set."""
-    if not LOGIN_SCRIPT.exists():
-        print("ERROR: ztb_login.py not found; cannot auto-fetch token.", file=sys.stderr)
-        return False
-    print("🔐 BEARER missing — invoking ztb_login.py to obtain a fresh token…")
-    try:
-        # visible to user
-        subprocess.run([sys.executable, str(LOGIN_SCRIPT)], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: ztb_login.py failed with exit code {e.returncode}", file=sys.stderr)
-        return False
-    # reload env so we get the new token immediately
-    load_env_file(".env")
-    return bool((os.environ.get("BEARER") or "").strip())
-
-def _refresh_bearer_and_update_session(session: requests.Session) -> bool:
-    """On 401: run login, reload env, update session header."""
-    print("🔄 401 Unauthorized — refreshing token via ztb_login.py and retrying once…")
-    if not _invoke_login():
-        print("ERROR: token refresh failed.", file=sys.stderr)
-        return False
-    new_bearer = (os.environ.get("BEARER") or "").strip()
-    if not new_bearer:
-        print("ERROR: ztb_login.py ran but BEARER is still empty.", file=sys.stderr)
-        return False
-    session.headers["Authorization"] = f"Bearer {new_bearer}"
-    return True
-
-def get_session_and_bases():
-    # Prefer ZTB_API_BASE, fallback to legacy ZIA_API_BASE
-    base_env = os.environ.get("ZTB_API_BASE") or os.environ.get("ZIA_API_BASE") or ""
-    base_root = _normalize_base_root(base_env)
-    if not base_root:
-        print("ERROR: Missing ZTB_API_BASE (or legacy ZIA_API_BASE) in environment (.env).", file=sys.stderr)
-        sys.exit(1)
-
-    # Ensure a bearer exists BEFORE creating the session header
-    if not (os.environ.get("BEARER") or "").strip():
-        if not _invoke_login():
-            print("ERROR: BEARER still missing after ztb_login.py.", file=sys.stderr)
-            sys.exit(1)
-
-    bearer = (os.environ.get("BEARER") or "").strip()
-
-    base_v3 = f"{base_root}/api/v3"
-    base_v2 = f"{base_root}/api/v2"
-
-    # Origin/Referer like the UI (root without "-api.")
-    origin_host = base_root.replace("-api.", ".")
-    referer_path = os.getenv("ZTB_REFERER_PATH", "/").lstrip("/")
-    referer = origin_host + (("" if referer_path == "" else f"{referer_path}/"))
-
-    s = requests.Session()
-    s.headers.update({
-        "Authorization": f"Bearer {bearer}",  # BEARER here is already ensured/fresh
-        "Accept": "application/json",
-        "User-Agent": "pull_site.py",
-    })
-
-    return s, base_v3, base_v2, origin_host, referer
-
-session, BASE_V3, BASE_V2, ORIGIN, REFERER = get_session_and_bases()
-
-# ------------------------
-# HTTP helpers (with single-run 401 refresh)
-# ------------------------
-def _request_with_auto_refresh(method: str, url: str, *, params=None, headers=None, timeout=60, json=None, data=None):
-    r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
-    if r.status_code == 401:
-        if _refresh_bearer_and_update_session(session):
-            r = session.request(method, url, params=params, headers=headers, timeout=timeout, json=json, data=data)
-    return r
+def _request_with_auto_refresh(method: str, url: str, **kwargs):
+    if client is None:
+        raise RuntimeError("Initialize the CLI before making API requests")
+    return client.request(method, url, **kwargs)
 
 def get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Any:
     r = _request_with_auto_refresh("GET", url, params=params, headers=headers, timeout=60)
@@ -382,8 +290,8 @@ def write_vlans_csv(vlans: List[Dict[str, Any]], path: pathlib.Path):
 CSV_HEADER = (
     "site_name,gateway_name,gateway_name_b,city,country,"
     "wan0_ip,wan0_mask,wan0_gw,wan1_ip,wan1_mask,wan1_gw,"
-    "template_name,template_id,wan_dns,private_dns,dhcp_server_ip,zia_location_name,"
-    "location_type,location_template_name,location_template_id,"
+    "template_name,wan_dns,private_dns,dhcp_server_ip,zia_location_name,"
+    "location_type,location_template_name,"
     "wan_interface_name,wan1_interface_name,vlans_file,post,appc_provision\n"
 )
 
@@ -459,6 +367,44 @@ def is_ha_internal_vlan(v: Dict[str, Any]) -> bool:
         return True
     return False
 
+def parse_private_dns_members(data: Any, site_id: str) -> str:
+    """Read confirmed membership responses; unknown shapes are not empty DNS."""
+    if not isinstance(data, dict):
+        raise ValueError("expected a private-DNS response object")
+    if "result" in data:
+        members = data["result"]
+        if not isinstance(members, list):
+            raise ValueError("private-DNS result must be a list")
+        attributes = []
+        for member in members:
+            if not isinstance(member, dict):
+                raise ValueError("private-DNS membership must be an object")
+            if "site_id" in member and str(member["site_id"]) != str(site_id):
+                raise ValueError("private-DNS membership belongs to a different site")
+            attributes.append(member.get("membership_info"))
+    elif "member_attributes" in data:
+        attributes = [data["member_attributes"]]
+    else:
+        raise ValueError("unrecognized private-DNS response structure")
+
+    ips = []
+    for attrs in attributes:
+        if not isinstance(attrs, dict) or not isinstance(attrs.get("ip_prefix"), list):
+            raise ValueError("private-DNS membership requires an ip_prefix list")
+        for prefix in attrs["ip_prefix"]:
+            if not isinstance(prefix, str) or not prefix.strip():
+                raise ValueError("private-DNS prefixes must be nonempty strings")
+            try:
+                address = ipaddress.IPv4Interface(prefix.strip())
+            except ValueError:
+                raise ValueError("private-DNS response contains an invalid or unsupported IPv4 prefix") from None
+            # Only /32 denotes a single host. Keep other prefix lengths intact.
+            value = str(address.ip) if address.network.prefixlen == 32 else str(address)
+            if value not in ips:
+                ips.append(value)
+    return ",".join(ips)
+
+
 def get_private_dns_members(site_id: str) -> str:
     """
     Fetch Private DNS members for the site from System-Private-DNS-Servers-Group.
@@ -478,23 +424,18 @@ def get_private_dns_members(site_id: str) -> str:
     
     try:
         data = get_json(url, params=params, headers=headers)
-        # Response structure: {"member_attributes": {"ip_prefix": ["1.2.3.4/32", ...]}}
-        if isinstance(data, dict):
-            attrs = data.get("member_attributes", {})
-            prefixes = attrs.get("ip_prefix", [])
-            if isinstance(prefixes, list):
-                # Strip /32 for CSV readability
-                ips = [p.split("/")[0] for p in prefixes if isinstance(p, str)]
-                return ",".join(ips)
-    except Exception as e:
-        print(f"WARN: Failed to fetch Private DNS members: {e}", file=sys.stderr)
-    
-    return ""
+    except (RuntimeError, ValueError, requests.RequestException) as exc:
+        raise RuntimeError("Private DNS lookup failed; export stopped before writing files. Check access/connectivity and retry; use --debug for HTTP status.") from exc
+    try:
+        return parse_private_dns_members(data, site_id)
+    except ValueError as exc:
+        raise ValueError(f"{exc}; export stopped before writing files. Check the private-DNS response format.") from None
 
 # ------------------------
 # Main
 # ------------------------
-def main():
+def main(argv=None):
+    global client, BASE_V3, BASE_V2, ORIGIN, REFERER
     ap = argparse.ArgumentParser(
         description="List sites OR pull one by name; saves VLANs (JSON+CSV) and updates sites.csv"
     )
@@ -505,7 +446,27 @@ def main():
     ap.add_argument("--list-templates", action="store_true", help="List templates (name, deployment_type, platform_type, id)")
     ap.add_argument("--template-search", default="", help="Optional name filter for --list-templates (uses API 'search' param)")
     ap.add_argument("--list-locations", action="store_true", help="List ZIA locations (name, id)")
-    args = ap.parse_args()
+    ap.add_argument("--env-file", default=".env", help="Credential file; process environment takes precedence")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        config = Settings.load(args.env_file)
+        errors = config.errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        client = ZTBClient(config, debug=args.debug)
+        BASE_V3, BASE_V2, ORIGIN, REFERER = client.api_v3, client.api_v2, client.origin, client.referer
+        return export_or_list(args) or 0
+    except (ValueError, RuntimeError, OSError, requests.RequestException) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if client is not None:
+            client.close()
+            client = None
+
+
+def export_or_list(args):
 
     # Handle location listing early-out
     if args.list_locations:
@@ -540,6 +501,11 @@ def main():
 
     # VLANs
     vlans_all = get_vlans_v2_network(str(site_id))
+    if pathlib.Path(args.site_name).name != args.site_name or args.site_name in (".", ".."):
+        raise ValueError("site name must not contain path separators")
+    # Resolve DNS before writing any exports; failed reads must not erase saved values.
+    private_dns_ips = get_private_dns_members(str(site_id))
+    OUT_VLANS_DIR.mkdir(exist_ok=True)
     vlan_json_path = OUT_VLANS_DIR / f"{args.site_name}.json"
     vlan_json_path.write_text(json.dumps(vlans_all, indent=2) + "\n", encoding="utf-8")
     print(f"Saved VLANs JSON: {vlan_json_path} (count={len(vlans_all)})")
@@ -582,10 +548,8 @@ def main():
     wan1_gw   = gw_b.get("default_gw_ip", "")
     wan1_if   = gw_b.get("wan_interface", "")
 
-    # Fetch Private DNS
-    private_dns_ips = get_private_dns_members(str(site_id))
-
-    # sites.csv row (defaults you can edit before bulk_create) — leave template_id BLANK on purpose
+    # Export the human-readable template name; the deployment engine resolves its ID.
+    # Omit template ID columns so re-export preserves overrides without adding columns.
     csv_row = {
         "site_name":           args.site_name,
         "gateway_name":        gateway_name_a,
@@ -602,19 +566,17 @@ def main():
         "wan1_gw":             wan1_gw,
 
         "template_name":       row.get("template_name","") or ci.get("template_name",""),
-        "template_id":         "",  # intentionally blank; resolve by name at runtime in bulk_create.py
         "wan_dns":             ci.get("per_site_dns","") or row.get("per_site_dns",""),
         "private_dns":         private_dns_ips,
         "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
         "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or args.site_name,
         "location_type":       "auto",
         "location_template_name": "Default Location Template",
-        "location_template_id": "",
 
         "wan_interface_name":  wan0_if,
         "wan1_interface_name": wan1_if,
 
-        "vlans_file":          (OUT_VLANS_DIR / f"{args.site_name}.csv").as_posix(),
+        "vlans_file":          (OUT_VLANS_DIR / f"{args.site_name}.{'json' if args.json_only else 'csv'}").relative_to(CSV_PATH.parent).as_posix(),
         "post":                "0",
         "appc_provision":      "0",
     }
@@ -623,4 +585,4 @@ def main():
     print(f"Upserted row in {CSV_PATH}: {csv_row}")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

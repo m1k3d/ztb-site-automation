@@ -1,2 +1,2 @@
-site_name,gateway_name,gateway_name_b,city,country,wan0_ip,wan0_mask,wan0_gw,wan1_ip,wan1_mask,wan1_gw,template_name,template_id,wan_dns,private_dns,dhcp_server_ip,zia_location_name,location_type,location_template_name,location_template_id,wan_interface_name,wan1_interface_name,vlans_file,post,appc_provision
-Site1,Site1-gw1,Site1-gw2,San Francisco,United States,123.123.123.10,24,123.123.123.1,,,,zt600-standalone-branch-prod,,"8.8.8.8,1.1.1.1",,10.0.0.1,Site1-br,new,Default Location Template,,ge5,,/Users/username/ztb-automation/vlans/Utrecht-Branch.csv,0,0
+site_name,gateway_name,template_name,wan_interface_name,wan0_ip,wan0_mask,wan0_gw,wan_dns,location_type,vlans_file,post,appc_provision
+Example-Branch,Example-Branch-gw,Branch-Standalone,ge3,192.0.2.2,24,192.0.2.1,"1.1.1.1,8.8.8.8",none,vlans.csv,1,0

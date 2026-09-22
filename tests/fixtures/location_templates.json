@@ -1,0 +1,9 @@
+{
+  "location_templates": [
+    {"id": 3184987, "name": "Default Location Template"},
+    {"id": 3219369, "name": "ZT-600-SA"},
+    {"id": 3273053, "name": "Test-Template01"},
+    {"id": 3273056, "name": "Test-Template02"}
+  ],
+  "ztwEnabled": true
+}

@@ -1,94 +1,77 @@
-# ZPA Provisioning Configuration
+# Optional ZPA App Connector provisioning
 
-## Overview
-The `zpa_provisioning.py` script now automatically creates App Connector Provisioning Keys that match your existing configuration pattern.
+Use the main deployment workflow to create ZPA App Connector resources for selected new ZTB sites. Start with the [setup guide](readme.md); this integration is optional and is disabled per site unless `appc_provision` is enabled.
 
-## How It Works
+## What the integration does
 
-When `appc_provision=1` in `sites.csv`, the script will:
+For each selected new site with `appc_provision=1`, the deployment engine:
 
-1. **Authenticate to ZPA** using credentials from `.env`
-2. **Fetch Enrollment Certificate** (default: "Connector" signing certificate)
-3. **Fetch App Connector Group** (auto-selects first available or uses specified group)
-4. **Create Provisioning Key** with:
-   - Name: `{site_name}` (e.g., "Branch1")
-   - Maximum Usage: `2` (default, matches your screenshot)
-   - App Connector Group: Auto-detected or specified
-   - Signing Certificate: "Connector" (standard)
-5. **Configure ZTB Site** with the generated provisioning key
+1. Creates an App Connector Group named after the site.
+2. Creates a provisioning key with the site name, that group, the configured enrollment certificate, and maximum usage of 2.
+3. Attaches the provisioning key to the ZTB cluster.
 
-## Required Environment Variables
+Creating these resources does not independently verify that an App Connector has registered or can pass traffic. Existing ZTB sites are blocked by the main duplicate check; this is not a command for adding ZPA to an existing site.
 
-Add these to your `.env` file:
+## Prerequisites and credentials
 
-```bash
-# ZPA API Configuration
+You need ZPA API credentials with access to enrollment certificates, App Connector Groups, and provisioning keys. The named enrollment certificate must already exist.
+
+Add the following to the same credential file used for ZTB:
+
+```dotenv
 ZPA_ENABLED=true
-ZPA_CLIENT_ID="your-client-id"
-ZPA_CLIENT_SECRET="your-client-secret"
-ZPA_CUSTOMER_ID="your-customer-id"
-# Any ZPA cloud is supported. Examples:
-# ZPA_BASE_URL="https://config.private.zscaler.com"
-# ZPA_BASE_URL="https://config.zscalerthree.net"
-# ZPA_BASE_URL="private.zscaler.com"   # also accepted (auto-normalized)
+ZPA_CLIENT_ID="<client-id>"
+ZPA_CLIENT_SECRET="<client-secret>"
+ZPA_CUSTOMER_ID="<customer-id>"
+ZPA_ENROLLMENT_CERT_NAME="Connector"
 ZPA_BASE_URL="https://config.private.zscaler.com"
 ```
 
+Use the base URL for your ZPA cloud. The example is not a universal endpoint. `ZPA_CUSTOMER_ID` may be omitted if the authentication token supplies `custId`; an explicitly configured customer ID is checked against the token when available. The certificate name defaults to `Connector` but can be changed.
 
+Both ZTB and ZPA use the selected `--env-file`; environment variables take precedence. Authentication can update tokens in that file. Do not share or commit it.
 
-## Usage
+## Select sites and deploy
 
-### In sites.csv
-
-Set `appc_provision=1` for sites that should get ZPA App Connector provisioning:
+In `sites.csv`, set both `post=1` and `appc_provision=1` for each intended new site. For example:
 
 ```csv
-site_name,gateway_name,template_name,vlans_file,post,appc_provision
-Branch1,Branch1-gw-1,zt600-SA-prod-DHCP-Relay,/path/to/vlans.csv,1,1
+site_name,gateway_name,template_name,wan_interface_name,location_type,city,country,post,appc_provision
+Branch1,Branch1-gw-1,Your-Template,ge3,none,Amsterdam,Netherlands,1,1
 ```
 
-### Run the Script
+Replace the template and interface with values appropriate for your tenant. With the WAN address fields omitted, this example requests WAN DHCP.
 
 ```bash
-# Dry run to preview
-python3 bulk_create.py --dry-run
-
-# Execute provisioning
-python3 bulk_create.py
+python3 bulk_create.py --csv sites.csv --validate-only
+python3 bulk_create.py --csv sites.csv --dry-run
+python3 bulk_create.py --csv sites.csv
 ```
 
-## What Gets Created
+Windows users can use `.\.venv\Scripts\python.exe` in place of `python3` after following the main setup guide.
 
-For each site with `appc_provision=1`:
+Offline validation makes no network requests. Preview authenticates to ZPA and checks the customer/certificate before any deployment writes. The named certificate must resolve; there is no arbitrary certificate fallback. Preview does not create groups or keys, or attach keys to ZTB.
 
-1. **ZPA Provisioning Key**:
-   - Name: Same as site name (e.g., "Branch1")
-   - Max Usage: 2
-   - App Connector Group: Auto-detected
-   - Signing Certificate: "Connector"
+A selected `appc_provision=1` row conflicts with `ZPA_ENABLED=false` and blocks preflight. Optional ZPA preflight failures block the whole batch before site creation.
 
-2. **ZTB Configuration**:
-   - Cluster gets configured with the provisioning key
-   - App Connector can register automatically
+## Results and troubleshooting
 
-## Troubleshooting
+Read the short report under `out/runs/` and inspect the `ZPA` stage in its JSON counterpart. API-stage success is separate from connector registration and connectivity.
 
-### "Failed to get enrollment certificate ID"
-- Verify ZPA credentials are correct
-- Check that you have access to enrollment certificates in ZPA console
+| Problem | What to check |
+| --- | --- |
+| Authentication or customer mismatch | Client credentials, cloud URL, and customer ID. |
+| Enrollment certificate unavailable | Exact configured name and permission to read it. |
+| Group or provisioning key creation fails | Console error, API permissions, and any resources already created during this run. |
+| Attaching the key to ZTB fails | The target cluster and whether the ZPA group/key already exist. |
+| Token expires during a batch | Inspect partial results; mid-batch ZPA token refresh is not implemented. |
 
+## Limitations
 
+- Groups and keys are not automatically reused or rolled back after failure. Inspect resources before repair; rerunning site creation will stop at the existing-site check.
+- The current country mapping defaults unrecognized values to `NL`. Review the country settings before deploying outside the supported mappings in `zpa_provisioning.py`.
+- Group creation attempts OpenStreetMap geocoding using the site city and country. Lookup failures fall back to coordinates `0,0`.
+- HA and ZPA workflows need broader live validation. Offline tests do not establish connector readiness.
+- The integration provisions App Connector resources; it does not configure security policies.
 
-### "Failed to create ZPA Provisioning Key"
-- Check the error message for details
-- Verify your ZPA user has permission to create provisioning keys
-- Ensure the App Connector Group exists
-
-## Example Output
-
-```
-🚀 Starting ZPA Provisioning for Branch1...
-   ✅ Created provisioning key with App Connector Group
-   🔑 Generated ZPA Key: AbCdEfGhIj...
-   ✅ Updated ZTB Cluster 12345 with ZPA Key
-```
+[Return to the setup guide](readme.md)

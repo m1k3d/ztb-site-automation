@@ -27,7 +27,7 @@ def prepare_location_context(
     resolve_existing: Callable[[str], Optional[int]],
     resolve_location_template: Optional[Callable[[str], Optional[int]]] = None,
 ) -> Dict[str, Any]:
-    """Resolve a CSV row into the context consumed by site_template.json.j2.
+    """Resolve a CSV row into the context consumed by site_payload.py.
 
     ``auto`` preserves the legacy behavior: reuse a matching ZIA location, or
     create a new one if no match exists. New locations require the Location
