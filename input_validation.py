@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from location_config import normalize_location_type
+from country_catalog import resolve_country
 
 
 @dataclass(frozen=True)
@@ -112,13 +113,24 @@ class RowValidator:
             self.error(name, "expected an interface name" + (" or comma-separated interface names" if multiple else ""))
 
 
-def validate_vlan_rows(rows, source, issues):
+def without_disabled_dhcp_range(row):
+    """Discard inactive scope data without mutating a source CSV/JSON row."""
+    result = dict(row)
+    if str(result.get("dhcp_service", "")).strip().lower() in ("off", "no_dhcp"):
+        result.update(dhcp_start="", dhcp_end="")
+        result.pop("dhcp_range", None)
+        result.pop("range_list", None)
+    return result
+
+
+def validate_vlan_rows(rows, source, issues, *, ha=False):
     output, tags, names = [], {}, set()
     for number, raw in rows:
         check = RowValidator(source, number, issues)
         if not isinstance(raw, dict):
             check.error("VLAN", "expected an object")
             continue
+        raw = without_disabled_dhcp_range(raw)
         v = {str(k): str(value if value is not None else "").strip() for k, value in raw.items()}
         # Accept exported JSON and the existing CSV schema.
         v["name"] = v.get("display_name") or v.get("name", "")
@@ -138,10 +150,26 @@ def validate_vlan_rows(rows, source, issues):
             v["tag"] = str(tag)
         interface = v.get("interface", "")
         check.interfaces("interface", interface, multiple=True)
-        for port in set(p.strip().lower() for p in interface.split(",")):
-            key = (port, tag)
+        target = v.get('gateway_target', '').lower() or 'all'
+        if target not in ('all', 'a', 'b'):
+            check.error('gateway_target', 'expected all, a, or b')
+        if target == 'b' and not ha:
+            check.error('gateway_target', 'Gateway B requires a high-availability site')
+        management = v['zone'].lower() == 'management zone' or 'lo0' in interface.lower().split(',')
+        if ha and target in ('a','b') and not management:
+            check.error('gateway_target', 'Regular HA LAN VLANs apply to both gateways; use all. Configure extra WANs under Additional WANs.')
+        ports = [p.strip().lower() for p in interface.split(',')]
+        if target != 'all' and len(ports) != 1:
+            check.error('interface', 'a network assigned to one gateway requires one interface')
+        if ha and target == 'all' and len(ports) > 2:
+            check.error('interface', 'use one shared interface or one interface per HA gateway')
+        owners = ('a', 'b') if ha and target == 'all' else (target if target != 'all' else 'a',)
+        assignments = ([(owner, ports[min(index, len(ports) - 1)]) for index, owner in enumerate(owners)]
+                       if ha else [('a', port) for port in set(ports)])
+        for owner, port in assignments:
+            key = (owner, port, tag)
             if key in tags:
-                check.error("tag", f"duplicate tag on {port} (first used at row {tags[key]})")
+                check.error("tag", f"duplicate tag on Gateway {owner.upper()} {port} (first used at row {tags[key]})")
             tags[key] = number
         gateway = check.check("default_gateway", lambda: ipv4(v.get("default_gateway", "")))
         subnet = v.get("subnet", "")
@@ -184,14 +212,19 @@ def validate_vlan_rows(rows, source, issues):
         service = {"on": "inherit", "off": "no_dhcp", "": "inherit" if start and end else "no_dhcp"}.get(service, service)
         if service not in ("inherit", "no_dhcp", "non_airgapped"):
             check.error("dhcp_service", "expected inherit/on, no_dhcp/off, or non_airgapped")
+        dns = v.get("per_network_dns", "")
+        if dns:
+            for server in dns.split(","):
+                check.check("per_network_dns", lambda server=server: ipv4(server.strip()))
+            dns = ",".join(server.strip() for server in dns.split(","))
         enabled_default = "status" not in raw or str(raw["status"]).lower() == "provisioned"
         enabled = check.check("enabled", lambda: boolean(v.get("enabled", ""), enabled_default))
         share = check.check("share_over_vpn", lambda: boolean(v.get("share_over_vpn", "")))
         zpa_include = check.check("zpa_include", lambda: boolean(v.get("zpa_include", "")))
         if zpa_include:
             zone_key = re.sub(r"[^a-z0-9]", "", v["zone"].lower())
-            if "lo0" in {p.strip().lower() for p in interface.split(",")} or zone_key in {"management", "managementzone", "mgmt", "mgmtzone", "wan", "wanzone", "ha", "hazone", "hainternal"}:
-                check.error("zpa_include", "management, WAN, and HA networks cannot be included")
+            if zone_key in {"wan", "wanzone", "ha", "hazone", "hainternal"}:
+                check.error("zpa_include", "WAN and HA networks cannot be included")
             if enabled is not True:
                 check.error("zpa_include", "requires an enabled VLAN")
         output.append({
@@ -200,6 +233,8 @@ def validate_vlan_rows(rows, source, issues):
             "default_gateway": v["default_gateway"], "interface": interface, "zone": v["zone"],
             "enabled": enabled, "share_over_vpn": share, "dhcp_service": service,
             "zpa_include": zpa_include,
+            **({'gateway_target': target} if 'gateway_target' in v else {}),
+            **({"per_network_dns": dns} if dns else {}),
             **({"dhcp_range": f"{start}-{end}"} if start and end else {}),
         })
     return output
@@ -229,7 +264,7 @@ def load_vlan_rows(path, issues):
 def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
     """Validate CSV-like rows; UI callers may supply a `vlans` list directly."""
     result = ValidationResult()
-    site_names, gateway_names, zpa_names = {}, {}, {}
+    site_names, gateway_names, zpa_names, template_names = {}, {}, {}, {}
     for number, raw in (rows if numbered else enumerate(rows, 2)):
         check = RowValidator(source, number, result.issues)
         if not isinstance(raw, dict):
@@ -245,11 +280,53 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
         if post != "1":
             continue
         row = {str(k): str(v if v is not None else "").strip() for k, v in raw.items() if k != "vlans"}
+        from additional_wans import selections
+        copy_wans = check.check('copy_additional_wans', lambda: boolean(row.get('copy_additional_wans','')))
+        row['copy_additional_wans'] = '1' if copy_wans else '0'
+        check.check('additional_wans_json', lambda: selections(row))
         for name in ("site_name", "gateway_name", "wan_interface_name"):
             check.required(row, name)
         if not (row.get("template_name") or row.get("template_id")):
             check.error("template_name/template_id", "one is required")
-        name = row.get("site_name", "").lower()
+        row["template_mode"] = row.get("template_mode") or "existing"
+        row["dns_split"] = row.get("dns_split") or "0"
+        if row["dns_split"] not in ("0", "1"):
+            check.error("dns_split", "expected 1 to enable private-domain DNS or 0 to keep automatic DNS policies")
+        if row["dns_split"] == "1":
+            from dns_policy import private_domains, resolver_ips
+            check.check("dns_private_domains", lambda: private_domains(row.get("dns_private_domains", "")))
+            for field in ("private_dns", "wan_dns"):
+                check.check(field, lambda field=field: resolver_ips(row.get(field, "")))
+            if row.get("gateway_name_b"):
+                check.error("dns_split", "Split DNS currently supports standalone gateways; HA must be verified first")
+            if len('Private-Domains-to-Private-DNS-' + row.get('site_name', '')) > 255:
+                check.error("site_name", "too long for the site-specific DNS policy name")
+        row["ucaas_local_breakout"] = row.get("ucaas_local_breakout") or "0"
+        row["ucaas_path_selection"] = row.get("ucaas_path_selection") or "best"
+        if row["ucaas_local_breakout"] not in ("0", "1"):
+            check.error("ucaas_local_breakout", "expected 1 to enable UCaaS local breakout or 0 to leave forwarding unchanged")
+        if row["ucaas_local_breakout"] == "1":
+            from ucaas_breakout import PATH_SELECTIONS, MESSAGES, selected_services
+            check.check("ucaas_services", lambda: selected_services(row))
+            if row["ucaas_path_selection"] not in PATH_SELECTIONS:
+                check.error("ucaas_path_selection", MESSAGES["ucaas_path_selection"])
+            if row.get("gateway_name_b"):
+                check.error("ucaas_local_breakout", "UCaaS local breakout currently supports standalone gateways; HA must be verified first")
+            if row.get("ucaas_secondary_wan") == row.get("wan_interface_name"):
+                check.error("ucaas_secondary_wan", "must differ from the primary WAN interface")
+        if row["template_mode"] not in ("existing", "clone"):
+            check.error("template_mode", "choose existing or clone")
+        if row["template_mode"] == "clone":
+            row["new_template_name"] = row.get("new_template_name") or row.get("site_name", "")
+            clone_name = row["new_template_name"].casefold()
+            if not clone_name or len(row["new_template_name"]) > 256 or any(ord(c) < 32 for c in row["new_template_name"]):
+                check.error("new_template_name", "enter a template name between 1 and 256 characters without control characters")
+            if clone_name in template_names:
+                check.error("new_template_name", f"each site needs its own template name (first used at row {template_names[clone_name]})")
+            template_names[clone_name] = number
+            if clone_name == row.get("template_name", "").casefold():
+                check.error("new_template_name", "must differ from the source template name")
+        name = row.get("site_name", "").strip().casefold()
         if name in site_names:
             check.error("site_name", f"duplicate selected site (first used at row {site_names[name]})")
         site_names[name] = number
@@ -302,6 +379,10 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
         row["dhcp_service_mode"] = service
         mode = check.check("location_type", lambda: normalize_location_type(row.get("location_type")))
         row["location_type"] = mode or "auto"
+        if row.get("country"):
+            country = check.check("country", lambda: resolve_country(row["country"]))
+            if country:
+                row["country"] = country["name"]
         if mode == "new" or (mode == "auto" and not row.get("zia_location_name")):
             check.required(row, "country")
         if mode == "existing":
@@ -326,18 +407,18 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
             if not isinstance(raw["vlans"], list):
                 check.error("vlans", "expected a list of VLAN objects")
             else:
-                vlans = validate_vlan_rows(enumerate(raw["vlans"], 1), f"{source} row {number} VLANs", result.issues)
+                vlans = validate_vlan_rows(enumerate(raw["vlans"], 1), f"{source} row {number} VLANs", result.issues, ha=bool(row.get('gateway_name_b')))
         elif row.get("vlans_file"):
             path = Path(row["vlans_file"]).expanduser()
             if not path.is_absolute():
                 path = Path(base_dir) / path
             path = path.resolve()
             row["vlans_file"] = str(path)
-            vlans = validate_vlan_rows(load_vlan_rows(path, result.issues), path, result.issues)
+            vlans = validate_vlan_rows(load_vlan_rows(path, result.issues), path, result.issues, ha=bool(row.get('gateway_name_b')))
         selected = [v for v in vlans if v.get("zpa_include") is True]
         if selected:
             if not appc:
-                check.error("appc_provision", "must be 1 when any VLAN has zpa_include=1; staging uses the new site's App Connector group")
+                check.error("appc_provision", "Turn on App Connector provisioning in Site details to include selected networks in a ZPA application segment.")
             excluded_ports = {row.get(k, "").lower() for k in ("wan_interface_name", "wan1_interface_name", "vrrp_link_interface")}
             for vlan in selected:
                 if excluded_ports.intersection(p.strip().lower() for p in vlan["interface"].split(",")):

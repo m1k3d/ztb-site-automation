@@ -1,0 +1,494 @@
+{
+  "schema": 2,
+  "retrieved_at": "2026-10-01T11:51:28.516467+00:00",
+  "services": [
+    {
+      "id": "teams",
+      "name": "Microsoft Teams",
+      "ipv4": [
+        "52.112.0.0/14",
+        "52.122.0.0/15"
+      ],
+      "domains": [
+        "*.keydelivery.mediaservices.windows.net",
+        "*.lync.com",
+        "*.skype.com",
+        "*.streaming.mediaservices.windows.net",
+        "*.teams.cloud.microsoft",
+        "*.teams.microsoft.com",
+        "aka.ms",
+        "join.secure.skypeassets.com",
+        "mlccdnprod.azureedge.net",
+        "teams.cloud.microsoft",
+        "teams.microsoft.com"
+      ],
+      "excluded_ipv6": 7,
+      "excluded_domains": [],
+      "scope": "Required Microsoft Teams (Skype service area) Worldwide endpoints. Other Microsoft 365 services and Common dependencies keep their existing forwarding policy.",
+      "sources": [
+        "https://endpoints.office.com/endpoints/worldwide?clientrequestid=15abdd3c-06de-4db4-921b-3cfc408ef894&ServiceAreas=Skype"
+      ],
+      "endpoints": [
+        {
+          "id": "set-11",
+          "label": "Media",
+          "ipv4": [
+            "52.112.0.0/14",
+            "52.122.0.0/15"
+          ],
+          "domains": [],
+          "ports": [
+            "udp:3478-3481"
+          ]
+        },
+        {
+          "id": "set-12",
+          "label": "Signaling",
+          "ipv4": [
+            "52.112.0.0/14",
+            "52.122.0.0/15"
+          ],
+          "domains": [
+            "*.lync.com",
+            "*.teams.cloud.microsoft",
+            "*.teams.microsoft.com",
+            "teams.cloud.microsoft",
+            "teams.microsoft.com"
+          ],
+          "ports": [
+            "tcp:80,443",
+            "udp:443"
+          ]
+        },
+        {
+          "id": "set-16",
+          "label": "Streaming",
+          "ipv4": [],
+          "domains": [
+            "*.keydelivery.mediaservices.windows.net",
+            "*.streaming.mediaservices.windows.net"
+          ],
+          "ports": [
+            "tcp:443"
+          ]
+        },
+        {
+          "id": "set-17",
+          "label": "Links",
+          "ipv4": [],
+          "domains": [
+            "aka.ms"
+          ],
+          "ports": [
+            "tcp:443"
+          ]
+        },
+        {
+          "id": "set-27",
+          "label": "Assets",
+          "ipv4": [],
+          "domains": [
+            "join.secure.skypeassets.com",
+            "mlccdnprod.azureedge.net"
+          ],
+          "ports": [
+            "tcp:443"
+          ]
+        },
+        {
+          "id": "set-127",
+          "label": "Skype",
+          "ipv4": [],
+          "domains": [
+            "*.skype.com"
+          ],
+          "ports": [
+            "tcp:80,443"
+          ]
+        }
+      ],
+      "version": "1b02759c239e"
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom Meetings",
+      "ipv4": [
+        "101.36.167.0/24",
+        "101.36.170.0/23",
+        "103.122.166.0/23",
+        "111.33.115.0/25",
+        "111.33.181.0/25",
+        "115.110.154.192/26",
+        "115.114.115.0/26",
+        "115.114.131.0/26",
+        "115.114.56.192/26",
+        "121.244.146.0/27",
+        "134.224.0.0/16",
+        "137.66.128.0/17",
+        "144.195.0.0/16",
+        "147.124.96.0/19",
+        "149.137.0.0/17",
+        "15.220.80.0/24",
+        "15.220.81.0/25",
+        "156.45.0.0/17",
+        "159.124.0.0/16",
+        "160.1.56.128/25",
+        "161.199.136.0/22",
+        "162.12.232.0/22",
+        "162.255.36.0/22",
+        "166.108.64.0/18",
+        "168.140.0.0/17",
+        "170.114.0.0/16",
+        "173.231.80.0/20",
+        "18.254.23.128/25",
+        "18.254.61.0/25",
+        "192.204.12.0/23",
+        "198.251.128.0/17",
+        "20.203.158.80/28",
+        "20.203.190.192/26",
+        "203.200.219.128/27",
+        "204.80.104.0/21",
+        "206.247.0.0/16",
+        "221.122.63.0/24",
+        "221.122.64.0/24",
+        "221.122.88.128/25",
+        "221.122.88.64/27",
+        "221.122.89.128/25",
+        "221.123.139.192/27",
+        "3.235.82.0/23",
+        "3.235.96.0/23",
+        "3.7.35.0/25",
+        "52.61.100.128/25",
+        "64.211.144.0/24",
+        "64.224.32.0/19",
+        "69.174.108.0/22"
+      ],
+      "domains": [
+        "*.zoom.com",
+        "*.zoom.us"
+      ],
+      "excluded_ipv6": 3,
+      "excluded_domains": [
+        "*.hcaptcha.com",
+        "cdn.cookielaw.org",
+        "googleapis.com",
+        "googletagmanager.com",
+        "gstatic.com"
+      ],
+      "scope": "Zoom Meetings and Webinars IP ranges and Zoom service domains. Phone, Contact Center, shared third-party website dependencies and certificate services keep their existing forwarding policy.",
+      "sources": [
+        "https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0060548",
+        "https://assets.zoom.us/docs/ipranges/ZoomMeetings.txt",
+        "https://assets.zoom.us/docs/ipranges/ZoomMeetings-IPv6.txt"
+      ],
+      "endpoints": [
+        {
+          "id": "media",
+          "label": "Media",
+          "ipv4": [
+            "101.36.167.0/24",
+            "101.36.170.0/23",
+            "103.122.166.0/23",
+            "111.33.115.0/25",
+            "111.33.181.0/25",
+            "115.110.154.192/26",
+            "115.114.115.0/26",
+            "115.114.131.0/26",
+            "115.114.56.192/26",
+            "121.244.146.0/27",
+            "134.224.0.0/16",
+            "137.66.128.0/17",
+            "144.195.0.0/16",
+            "147.124.96.0/19",
+            "149.137.0.0/17",
+            "15.220.80.0/24",
+            "15.220.81.0/25",
+            "156.45.0.0/17",
+            "159.124.0.0/16",
+            "160.1.56.128/25",
+            "161.199.136.0/22",
+            "162.12.232.0/22",
+            "162.255.36.0/22",
+            "166.108.64.0/18",
+            "168.140.0.0/17",
+            "170.114.0.0/16",
+            "173.231.80.0/20",
+            "18.254.23.128/25",
+            "18.254.61.0/25",
+            "192.204.12.0/23",
+            "198.251.128.0/17",
+            "20.203.158.80/28",
+            "20.203.190.192/26",
+            "203.200.219.128/27",
+            "204.80.104.0/21",
+            "206.247.0.0/16",
+            "221.122.63.0/24",
+            "221.122.64.0/24",
+            "221.122.88.128/25",
+            "221.122.88.64/27",
+            "221.122.89.128/25",
+            "221.123.139.192/27",
+            "3.235.82.0/23",
+            "3.235.96.0/23",
+            "3.7.35.0/25",
+            "52.61.100.128/25",
+            "64.211.144.0/24",
+            "64.224.32.0/19",
+            "69.174.108.0/22"
+          ],
+          "domains": [],
+          "ports": [
+            "tcp:443,8801-8802",
+            "udp:3478-3479,8801-8810"
+          ]
+        },
+        {
+          "id": "web",
+          "label": "Web",
+          "ipv4": [],
+          "domains": [
+            "*.zoom.com",
+            "*.zoom.us"
+          ],
+          "ports": [
+            "tcp:80,443",
+            "udp:443"
+          ]
+        }
+      ],
+      "version": "ba958d97a7e6"
+    },
+    {
+      "id": "webex",
+      "name": "Webex",
+      "ipv4": [
+        "114.29.192.0/19",
+        "144.196.0.0/16",
+        "150.253.128.0/17",
+        "163.129.0.0/17",
+        "170.133.128.0/18",
+        "170.72.0.0/16",
+        "172.194.164.0/24",
+        "173.243.0.0/20",
+        "173.39.224.0/19",
+        "20.108.99.0/24",
+        "20.120.238.0/23",
+        "20.50.235.0/24",
+        "20.53.87.0/24",
+        "20.57.87.0/24",
+        "20.68.154.0/24",
+        "20.76.127.0/24",
+        "207.182.160.0/19",
+        "209.197.192.0/19",
+        "210.4.192.0/20",
+        "216.151.128.0/19",
+        "23.89.0.0/16",
+        "4.144.190.0/24",
+        "4.152.180.0/24",
+        "4.152.214.0/24",
+        "4.158.208.0/24",
+        "4.175.120.0/24",
+        "40.119.234.0/24",
+        "44.234.52.192/26",
+        "48.202.19.0/24",
+        "52.232.210.0/24",
+        "62.109.192.0/18",
+        "64.68.96.0/19",
+        "66.163.32.0/19",
+        "69.26.160.0/19"
+      ],
+      "domains": [
+        "*.cisco.com",
+        "*.ciscospark.com",
+        "*.wbx2.com",
+        "*.webex.com",
+        "*.webexapis.com",
+        "*.webexcontent.com",
+        "cisco.com",
+        "ciscospark.com",
+        "wbx2.com",
+        "webex.com",
+        "webexapis.com",
+        "webexcontent.com"
+      ],
+      "excluded_ipv6": 3,
+      "excluded_domains": [],
+      "scope": "Webex media (including Teams video integration), core micro-services and content storage. Includes Cisco's published *.cisco.com domain. Additional integrations and shared third-party services keep their existing forwarding policy.",
+      "sources": [
+        "https://help.webex.com/article/WBX000028782"
+      ],
+      "endpoints": [
+        {
+          "id": "media",
+          "label": "Media",
+          "ipv4": [
+            "114.29.192.0/19",
+            "144.196.0.0/16",
+            "150.253.128.0/17",
+            "163.129.0.0/17",
+            "170.133.128.0/18",
+            "170.72.0.0/16",
+            "172.194.164.0/24",
+            "173.243.0.0/20",
+            "173.39.224.0/19",
+            "20.108.99.0/24",
+            "20.120.238.0/23",
+            "20.50.235.0/24",
+            "20.53.87.0/24",
+            "20.57.87.0/24",
+            "20.68.154.0/24",
+            "20.76.127.0/24",
+            "207.182.160.0/19",
+            "209.197.192.0/19",
+            "210.4.192.0/20",
+            "216.151.128.0/19",
+            "23.89.0.0/16",
+            "4.144.190.0/24",
+            "4.152.180.0/24",
+            "4.152.214.0/24",
+            "4.158.208.0/24",
+            "4.175.120.0/24",
+            "40.119.234.0/24",
+            "44.234.52.192/26",
+            "48.202.19.0/24",
+            "52.232.210.0/24",
+            "62.109.192.0/18",
+            "64.68.96.0/19",
+            "66.163.32.0/19",
+            "69.26.160.0/19"
+          ],
+          "domains": [],
+          "ports": [
+            "tcp:443,5004",
+            "udp:5004,9000"
+          ]
+        },
+        {
+          "id": "signaling",
+          "label": "Signaling",
+          "ipv4": [],
+          "domains": [
+            "*.cisco.com",
+            "*.ciscospark.com",
+            "*.wbx2.com",
+            "*.webex.com",
+            "*.webexapis.com",
+            "*.webexcontent.com",
+            "cisco.com",
+            "ciscospark.com",
+            "wbx2.com",
+            "webex.com",
+            "webexapis.com",
+            "webexcontent.com"
+          ],
+          "ports": [
+            "tcp:443"
+          ]
+        }
+      ],
+      "version": "82bd0c5693ec"
+    },
+    {
+      "id": "meet",
+      "name": "Google Meet",
+      "ipv4": [
+        "142.250.82.0/24",
+        "74.125.247.128/32",
+        "74.125.250.0/24"
+      ],
+      "domains": [
+        "*.clients6.google.com",
+        "accounts.google.com",
+        "apis.google.com",
+        "apps.google.com",
+        "chat.google.com",
+        "clients2.google.com",
+        "clients4.google.com",
+        "clients6.google.com",
+        "docs.google.com",
+        "fonts.gstatic.com",
+        "hangouts.googleapis.com",
+        "lh3.googleusercontent.com",
+        "meet.google.com",
+        "meet.turns.goog",
+        "meetings.googleapis.com",
+        "stream.meet.google.com",
+        "workspace.turns.goog",
+        "www.gstatic.com"
+      ],
+      "excluded_ipv6": 3,
+      "excluded_domains": [],
+      "scope": "Meet Workspace and consumer media, static resources, API and streaming domains. Includes the exact Docs and Chat hosts listed by Google. Path-specific feedback URLs keep their existing forwarding policy.",
+      "sources": [
+        "https://knowledge.workspace.google.com/admin/meet/prepare-your-network-for-meet-meetings-and-live-streams"
+      ],
+      "endpoints": [
+        {
+          "id": "media",
+          "label": "Media",
+          "ipv4": [
+            "142.250.82.0/24",
+            "74.125.247.128/32",
+            "74.125.250.0/24"
+          ],
+          "domains": [],
+          "ports": [
+            "udp:3478,19302-19309"
+          ]
+        },
+        {
+          "id": "fallback",
+          "label": "Media TLS",
+          "ipv4": [
+            "142.250.82.0/24",
+            "74.125.247.128/32",
+            "74.125.250.0/24"
+          ],
+          "domains": [
+            "meet.turns.goog",
+            "workspace.turns.goog"
+          ],
+          "ports": [
+            "tcp:443"
+          ]
+        },
+        {
+          "id": "web",
+          "label": "Web",
+          "ipv4": [],
+          "domains": [
+            "*.clients6.google.com",
+            "accounts.google.com",
+            "apis.google.com",
+            "apps.google.com",
+            "chat.google.com",
+            "clients2.google.com",
+            "clients4.google.com",
+            "clients6.google.com",
+            "docs.google.com",
+            "fonts.gstatic.com",
+            "hangouts.googleapis.com",
+            "lh3.googleusercontent.com",
+            "meet.google.com",
+            "meetings.googleapis.com",
+            "stream.meet.google.com",
+            "www.gstatic.com"
+          ],
+          "ports": [
+            "tcp:443",
+            "udp:443"
+          ]
+        }
+      ],
+      "version": "06c9911e5722"
+    }
+  ],
+  "source_sha256": {
+    "microsoft": "09d3f9fea6992bff53cd36ffb131ccf8e4783ec48c583ce2ceefdaed0fd78bd1",
+    "zoom": "a9307bb354991bc0c7caaba67bd5ff765fb03beda1ddcc2d605ce3c3aefaa7f5",
+    "zoom_ipv4": "e50972975c1ac3d14e6b5c4a77a8132d01d6bc9a3f31cd5b5700e48e5cb7bb08",
+    "zoom_ipv6": "c262a1a2c13eec27294f44f9e2b7f2c0ae1c76cb1ffb856cec241d2e28103b98",
+    "webex": "0ee9b65d12005f0b24846d2b76d8c10d0361979f98f1b1c3eeaf9c8fcdd764b6",
+    "google": "b58cdf8c41152432cfa59f2b6580581eabfa3ef70999cf025ea354a3e62d855b"
+  }
+}

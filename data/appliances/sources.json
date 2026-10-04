@@ -1,0 +1,12 @@
+{
+  "source": "https://www.zscaler.com/resources/data-sheets/zscaler-zero-trust-branch.pdf",
+  "page": 4,
+  "extraction": "Photo areas rendered from the source PDF on a white background for consistent SVG, PNG, and Visio display.",
+  "copyright": "Zscaler, Inc.",
+  "models": [
+    "ZT400",
+    "ZT600",
+    "ZT800",
+    "ZT8010"
+  ]
+}

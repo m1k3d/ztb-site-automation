@@ -10,9 +10,24 @@ import re
 
 import requests
 
+from input_validation import ValidationIssue
+
 
 PORT_RANGES = ((1, 52), (54, 65535))
 COLLECTIONS = ("segmentGroup", "serverGroup", "application")
+
+
+class SegmentConflict(ValueError):
+    """An operator-facing conflict built from destination and resource metadata."""
+
+
+class SegmentConflictIssue(ValidationIssue):
+    """Only known conflict messages may pass through the UI's error redaction."""
+
+
+def resource_label(value):
+    # Resource names are display data, never raw HTTP/exception text.
+    return " ".join(str(value).split())[:160]
 
 
 @dataclass(frozen=True)
@@ -136,30 +151,42 @@ def check_conflicts(plan, inventory):
     for resource, name in names.items():
         for row in inventory[resource]:
             if row["name"].strip().casefold() == name.casefold():
-                raise ValueError(f"ZPA {resource} '{name}' already exists; inspect it before recovery")
+                raise SegmentConflict(f"ZPA {resource} '{name}' already exists; inspect it before recovery")
     planned = [ipaddress.ip_network(n) for n in plan.subnets]
+    conflicts = []
     for application in inventory["application"]:
         domains = application.get("domainNames")
         if not isinstance(domains, list) or not all(isinstance(d, str) for d in domains):
             raise ValueError("ZPA application inventory is missing destinations; cannot check overlaps")
         for domain in domains:
             existing = _ip_network(domain)
-            if domain.strip() == "*" or (existing and any(existing.version == n.version and existing.overlaps(n) for n in planned)):
-                raise ValueError(f"ZPA application '{application['name']}' overlaps selected LAN subnets; review existing access before staging")
+            overlaps = [str(n) for n in planned if domain.strip() == "*" or
+                        (existing and existing.version == n.version and existing.overlaps(n))]
+            if overlaps:
+                conflicts.append(f"{', '.join(overlaps)} overlaps '{resource_label(application['name'])}' ({str(existing) if existing else '*'})")
+    if conflicts:
+        detail = "; ".join(conflicts[:5])
+        if len(conflicts) > 5:
+            detail += f"; and {len(conflicts) - 5} more conflict(s)"
+        raise SegmentConflict(f"ZPA destinations for '{resource_label(plan.site_name)}': {detail}. "
+            "For a new branch, set an unused destination address in VLANs, including the management IP if selected, "
+            "or deselect a network that should not be published. Existing ZPA segments are unchanged.")
 
 
 def check_batch_conflicts(plans, inventory):
     names, networks = set(), []
     for plan in plans:
         if plan.application_name in names:
-            raise ValueError("Selected sites generate the same ZPA application name")
+            raise SegmentConflict("Selected sites generate the same ZPA application name")
         names.add(plan.application_name)
         check_conflicts(plan, inventory)
         for value in plan.subnets:
             network = ipaddress.ip_network(value)
             for other_site, other in networks:
                 if other_site != plan.site_name and network.overlaps(other):
-                    raise ValueError(f"Selected ZPA subnet {value} overlaps another selected site: {other_site}")
+                    raise SegmentConflict(f"Selected ZPA destination {value} in '{resource_label(plan.site_name)}' overlaps another selected site: "
+                        f"'{resource_label(other_site)}' ({other}). Set distinct branch addresses in VLANs, including management IPs, "
+                        "or deselect a network that should not be published.")
             networks.append((plan.site_name, network))
 
 
@@ -181,6 +208,16 @@ def _ports(data, protocol):
     except (KeyError, TypeError, ValueError):
         pass
     return None
+
+
+def destination_networks(values):
+    """ZPA returns IPv4 /32 destinations as bare hosts; compare their scope."""
+    if not isinstance(values, (list, tuple)) or not values or any(not isinstance(v, str) for v in values):
+        return None
+    try:
+        return {str(ipaddress.IPv4Network(value, strict=False)) for value in values}
+    except ValueError:
+        return None
 
 
 def _create(context, resource, payload, report):
@@ -237,7 +274,7 @@ def stage_segments(context, plan, connector_group_id, report, *, emit=print):
         or str(app.get("segmentGroupId")) != group_id
         or _linked_ids(app, "serverGroups") != {server_id}
         or not isinstance(app.get("domainNames"), list)
-        or set(app["domainNames"]) != set(plan.subnets)
+        or destination_networks(app["domainNames"]) != destination_networks(plan.subnets)
         or _ports(app, "tcp") != list(PORT_RANGES) or _ports(app, "udp") != list(PORT_RANGES)
         or app.get("icmpAccessType") != "NONE" or app.get("healthReporting") != "ON_ACCESS"
         or app.get("bypassType") != "NEVER" or app.get("ipAnchored") is not False

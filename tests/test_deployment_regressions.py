@@ -52,6 +52,8 @@ class DeploymentRegressionTests(unittest.TestCase):
     def setUp(self):
         self.bulk = DeploymentEngine(Settings(ztb_api_base="https://example.invalid", bearer="offline-test"), emit=lambda message: print(message))
         self.addCleanup(self.bulk.client.close)
+        self.bulk.get_template_settings = Mock(return_value={'deployment_type':'standalone', 'dhcp_service':'server'})
+        self.bulk.list_site_inventory = Mock(return_value=[])
         exists = patch.object(self.bulk, "site_exists", return_value=False)
         exists.start()
         self.addCleanup(exists.stop)

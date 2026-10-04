@@ -1,193 +1,168 @@
-# ZTB Site Automation
+# Zero Trust Branch Site Automation
 
-Create Zscaler Zero Trust Branch sites from CSV files, with VLANs, private DNS, HA/VRRP, and optional ZPA App Connector provisioning. Use an existing site as a reference, prepare a batch of new branches, validate the inputs, and deploy with per-site results.
+Prepare and deploy new Zscaler Zero Trust Branch sites from a local browser workspace. Start from a working site or a CSV template, build your branch rollout, and review the changes before deploying.
 
-Maintained by [Mike Dechow](https://github.com/m1k3d) · [Repository](https://github.com/m1k3d/ztb-site-automation)
+Maintained by [Mike Dechow](https://github.com/m1k3d). Standalone deployment is available in the UI. HA configurations can be prepared and exported, but HA deployment from the UI is not enabled yet.
 
-**Current delivery:** a Python command-line application. The browser UI and packaged desktop application are planned; they are not included in this repository yet.
+[Start with Docker](#docker-quick-start) · [Use the workspace](#your-first-rollout) · [Import CSVs](#importing-sites-and-vlans) · [Save your work](#saving-and-returning-later) · [Troubleshooting](#troubleshooting)
 
-[Setup](#setup) · [Deploy your first batch](#deploy-your-first-batch) · [Reports](#reports-and-exit-codes) · [Troubleshooting](#troubleshooting) · [Configuration reference](docs/configuration.md) · [Development](docs/development.md)
+## Before you start
 
-## What it does
+Have these ready:
 
-- Creates standalone or HA sites using templates from your tenant.
-- Provisions VLANs, private DNS, and HA VRRP; optionally creates and attaches ZPA App Connector provisioning resources.
-- Optionally stages one disabled ZPA LAN application segment from VLANs marked `zpa_include=1`, linked to the new site's App Connector group. See [ZPA setup and staging](ZPA_PROVISIONING_README.md).
-- Validates selected CSV rows before deployment and offers an authenticated preview.
-- Stops an existing site from being recreated or modified by a sequential rerun.
-- Saves a short text report and structured JSON for deployment and preview runs.
+- Docker Desktop running on Windows or macOS, or Docker Engine with Compose on Linux. See [Docker requirements](docs/docker.md).
+- Your tenant API URL and a ZTB API key with permission to create the required resources.
+- An existing site template and the zones your networks will use.
+- Names, WAN settings, and VLAN addressing for the new branches.
 
-The tool creates configuration. Successful API calls do **not** confirm appliance activation, interface binding, or traffic connectivity. Automatic recovery, rollback, and updates to existing sites are not implemented. See [current limitations](#current-limitations).
+A working reference site is the easiest starting point. You can prepare drafts without connecting to a tenant. ZPA provisioning needs [separate ZPA settings](ZPA_PROVISIONING_README.md).
 
-## Before you begin
+## Docker quick start
 
-You need:
-
-- Python 3.11 or newer and network access to your tenant API.
-- A ZTB tenant URL and an API key with access to the required operations.
-- A ZTB site template matching your appliance model and standalone/HA design.
-- The zones referenced by your VLAN files, already created in the tenant.
-- Site and gateway names and network addressing for the new branches.
-
-A working reference site is the easiest starting point. Optional ZPA provisioning also requires [ZPA credentials and an enrollment certificate](ZPA_PROVISIONING_README.md).
-
-## Setup
-
-Download or clone this repository, open a terminal in its directory, and install the dependencies in a virtual environment.
-
-**macOS / Linux**
+Clone this repository and start the app:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 bulk_create.py --csv examples/sites.csv --validate-only
+git clone https://github.com/m1k3d/ztb-site-automation.git
+cd ztb-site-automation
+docker compose up --build -d
 ```
 
-**Windows PowerShell**
+If you downloaded the repository as a ZIP, extract it and run the last command from that folder.
 
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe bulk_create.py --csv examples/sites.csv --validate-only
-```
+Open **[http://localhost:8765](http://localhost:8765)**. The first build takes longer because Docker downloads the base image and Python dependencies. No Python or Node.js installation is needed on your computer.
 
-For the remaining commands, Windows users should replace `python3` with `.\.venv\Scripts\python.exe`.
+This package builds the Docker image locally. It does not require a registry account or a prebuilt image. Startup opens the workspace; it does not create anything in your tenant.
 
-The example check runs offline, needs no credentials, and should print:
+If port 8765 is in use, follow the [alternate-port instructions](docs/docker.md#alternate-port). Keep the app bound to localhost; this package is for one operator on one computer.
 
-```text
-Validated 1 selected site(s), 1 VLAN(s).
-```
+## Your first rollout
 
-The example contains placeholder template, interface, zone, and address values. It is for validation practice; adapt it to your tenant before deployment.
+The left sidebar follows the rollout in three steps. **How to use**, below the navigation, explains the controls without leaving the app.
 
-Create a local `.env` by copying `.env.example` if you do not already have one. Set:
+### 1. Reference site
 
-```dotenv
-ZTB_API_BASE="https://<your-tenant>-api.goairgap.com/api/v3"
-API_KEY="<your-api-key>"
-BEARER="AUTO_POPULATED"
-```
+Name your **Rollout project** at the top of the page.
 
-The scripts obtain and refresh the bearer token automatically. You do not need to run a separate login command. Existing environment variables take precedence over `.env`; use `--env-file path/to/tenant.env` to select another credential file. Keep credentials and real tenant exports out of version control.
+Choose **Pull reference site**, enter your tenant connection details, and select a working site to copy. Review the imported settings before using **Create branches**. Pulling a reference reads its configuration; it does not change that site.
 
-## Deploy your first batch
+You can also choose **Import CSVs** or **Add blank branch**. The example rollout is practice data: replace its names, template, interfaces, and addresses before deployment.
 
-### 1. Export a reference site
+### 2. New branches
 
-List the available sites, then export the one you want to copy:
+This page shows the rollout overview. Click a branch name to open its **Site details** and **VLANs** tabs. Check:
 
-```bash
-python3 pull_site.py
-python3 pull_site.py --site-name "Branch-Reference"
-```
+- Site and gateway names, country, and template.
+- WAN interface and DHCP or static addressing.
+- VLAN interfaces, tags, gateways, DHCP ranges, and DNS.
+- ZIA location choice and any optional ZPA, private-domain DNS, or UCaaS settings.
 
-The export updates `sites.csv` and writes `vlans/Branch-Reference.csv` and `.json` beside the scripts. It sets the exported site to `post=0`, so the reference is not selected for deployment. Pulling the same site again refreshes local exports; it does not change the tenant.
+Use **Rollout overview** to return to the list. Select one branch for a pilot or several for a batch. **Group by country** uses each branch's Country field; it only groups the list and does not change deployment order.
 
-### 2. Prepare the new branches
+**Ready** means the local input checks passed. Tenant checks happen in the next step. **Completed** is a recorded result for this project and connected tenant, not a live appliance health check. A site created in another project or tool may have no recorded result here; the tenant existence check still runs before creation.
 
-In `sites.csv`:
+### 3. Review rollout
 
-1. Duplicate the reference row for each new branch; leave the original at `post=0`.
-2. Assign unique site and gateway names.
-3. Review the template, WAN settings, DNS, country, and ZIA location choice. For a separate ZIA location, use `location_type=new` and a new `zia_location_name`.
-4. Copy the VLAN CSV for each branch that needs different networks, adjust its addressing, and update `vlans_file`.
-5. Set `post=1` only on the rows you intend to create.
+Choose **Review selected branches**. Check the selected names, networks, and optional resources. If you have not connected yet, use **Connections** on this page.
 
-Relative `vlans_file` paths are resolved from the directory containing the site CSV. Exported data needs review: location defaults and older interface/DHCP settings are not guaranteed to be suitable for a new deployment.
+Click **Preview deployment**. This checks the destination tenant and required resources without creating them. Resolve any errors, then review the destination and approve **Deploy N sites**.
 
-For WAN DHCP, leave the WAN address, mask, and gateway blank. For static WAN addressing, fill all three. See the [site and VLAN field reference](docs/configuration.md) for HA, location choices, DHCP modes, and optional settings.
+Branches run one at a time. Keep the app running until the batch finishes. Changes to the draft or connection, or a preview older than five minutes, require another preview.
 
-### 3. Validate and preview
+Read the per-site results and download the report. Deployment creates configuration; appliance activation, connector registration, interface binding, and traffic connectivity still need to be checked in the Zscaler console. Saved deployment diagrams are available as PNG, SVG, and editable Visio files. See the [diagram guide](docs/site-diagrams.md).
 
-```bash
-python3 bulk_create.py --csv sites.csv --validate-only
-python3 bulk_create.py --csv sites.csv --dry-run
-```
+## Importing sites and VLANs
 
-| Mode | What happens |
+Use **CSV templates**, next to **Import CSVs**, to download a starter ZIP:
+
+| Kit | Contents |
 | --- | --- |
-| `--validate-only` | Checks selected site/VLAN inputs locally. No authentication or network requests. |
-| `--dry-run` | Resolves tenant references, checks for existing sites, and performs optional ZPA preflight. May refresh tokens, but creates no deployment resources. |
-| No mode flag | Performs the checks, then deploys the selected new sites. |
+| Standalone | Two example branches, each with a gateway and a matching VLAN file |
+| High availability (HA) | One branch with Gateway A/B, both WANs, an HA link, shared LAN, and separate management networks; preparation and CSV export only |
 
-Fix validation and preview errors before proceeding. Preview does not prove that every API call or interface binding will succeed; device readiness and some interface checks are only evaluated during deployment.
+Each kit includes a guide explaining its columns. Extract the ZIP before importing.
 
-Input validation and template/location resolution cover the whole selected batch before deployment writes. A preflight error blocks the batch. Once execution begins, a failure or existing-site stop affects that site; later sites can still proceed.
+1. Edit `sites.csv` and the files in its `vlans` folder. Keep the headers and save as CSV, not XLSX.
+2. Choose **Import CSVs**, then **Choose CSV files**, and select `sites.csv`.
+3. The tool reads each row's `vlans_file` value and asks you to select the matching VLAN CSVs. For example, `vlans/branch-01.csv` means you select `branch-01.csv` from the extracted folder.
+4. Review each imported branch and its **VLANs** tab. Examples start unselected.
 
-### 4. Deploy and review
+You can select the site CSV and all matching VLAN CSVs together if they are in one folder. A blank `vlans_file` imports that site without VLANs. File matching uses the filename, so give each branch's VLAN file a unique name.
 
-```bash
-python3 bulk_create.py --csv sites.csv
-```
+Import replaces the current draft after confirmation. Use **New project** or **Save as copy** first if you want to keep the current rollout separately. Importing does not deploy anything.
 
-Read the per-site results and run report, then verify configuration in the Zscaler console. After appliance activation, verify interface bindings and connectivity separately. Set completed rows back to `post=0` to keep later batches focused on new work.
+Keep credentials out of CSVs. Imports reject credential fields, and exports remove them from older drafts. CSV export also blocks values or headers that begin like spreadsheet formulas; use plain text for configuration names. **Download CSV bundle** on Review exports a portable copy for reuse or the [Python CLI](docs/cli.md).
 
-## Reports and exit codes
+## Saving and returning later
 
-Runs that reach the deployment engine save reports under **`out/runs/`**, relative to your working directory:
+Edits save automatically. Wait for **Saved on this computer** before closing the tab.
 
-```text
-out/runs/
-  <UTC-timestamp>-<run-id>.txt
-  <UTC-timestamp>-<run-id>.json
-```
+- **New project** starts an empty rollout.
+- **Open project** returns to a saved rollout.
+- **Save as copy** keeps a separate version.
 
-Read the `.txt` for the outcome and next action. Use the `.json` for site statuses and stage results. Reports exclude credentials, request payloads, and raw API responses; detailed error messages remain in the console output.
+With Docker, projects, reports, diagrams, and refreshed catalogs live in the `workspace-data` Docker volume, not in the downloaded repository. They survive normal container rebuilds. Credentials entered in the UI and deployment approvals are not saved; reconnect and preview again after restarting.
 
-To choose another location:
+To stop and restart:
 
 ```bash
-python3 bulk_create.py --csv sites.csv --report-dir out/customer-rollout
+docker compose stop
+docker compose start
 ```
 
-| Site status | Meaning / next action |
-| --- | --- |
-| `success` | Requested API stages completed; verify the appliance separately. |
-| `preview` | Preview completed without deploying resources. |
-| `already_exists` | The site was left unchanged. A rerun does not repair it. |
-| `lookup_failed` | Site existence could not be established; no changes were made to that site. |
-| `partial` | The site was created, but configuration is incomplete. Inspect failed stages before repair. |
-| `failed` | Creation failed or its outcome is uncertain. Inspect the tenant before retrying. |
+Wait for deployments to finish before stopping. **Do not use `docker compose down --volumes` for routine updates**; it deletes the saved workspace.
 
-Exit code **0** means no reported failure, including a no-op with no selected rows. **1** includes validation errors, existing-site stops, lookup failures, and incomplete deployments. **130** means the run was interrupted.
+For updates, [back up the workspace](docs/docker.md#stop-back-up-and-upgrade), obtain the new source, then run:
 
-Validation-only runs, unselected batches, and failures before the engine starts do not create reports. An interrupted or unexpectedly terminated run can leave a JSON report marked `started`; this is not evidence that no changes occurred.
+```bash
+git pull --ff-only
+docker compose up --build -d
+```
 
-## Current limitations
+Use the same repository folder, Compose project name, and port setting so Docker reuses your existing volume.
 
-- **Recovery:** no automatic resume or rollback. Successful stages remain after a later failure. An existing-site stop prevents full recreation but does not complete missing stages.
-- **Inventory size:** duplicate detection does not yet paginate. If the first page of up to 100 records cannot establish absence, creation is blocked. Reference listing/export is also limited to its first inventory page.
-- **Concurrent runs:** duplicate checks protect sequential reruns, not two simultaneous creators. Coordinate deployments to the same tenant.
-- **Coverage:** standalone creation, private DNS, VLAN provisioning, and existing-site stops have live test coverage. ZPA group/key creation, attachment, and disabled LAN segment staging have also been tested on a standalone Netherlands site; connector registration and HA still need live validation. IPv6 is not supported.
+## Existing sites and incomplete runs
+
+The tool is for creating new sites. A matching existing site name blocks creation; a rerun does not overwrite or repair that site. If the inventory cannot be read completely, creation is blocked.
+
+A failed or interrupted run can leave resources behind. Read the report and inspect the tenant before retrying. There is no automatic rollback or resume. Do not rename a branch just to get around an existing-site check.
+
+Coordinate work with other operators: separate app instances and CLI processes do not share a deployment lock.
 
 ## Troubleshooting
 
-| Message or symptom | Action |
+| What you see | What to do |
 | --- | --- |
-| Nothing selected | Set `post=1` on the intended new-site rows. |
-| Validation error with file, row, and field | Correct that field and rerun `--validate-only`. DHCP ranges must exclude the gateway address. |
-| Template or location name cannot be resolved | List tenant templates/locations and check the spelling or explicit ID override. |
-| Already exists | Inspect the existing site. Do not rename it merely to bypass duplicate protection. |
-| Existence lookup failed | Check credentials, tenant access, and inventory size. No creation was attempted for that site. |
-| Loopback subnet or interface validation fails | Use `/32`, disable DHCP, and verify that each target gateway exposes `lo0`. See the [configuration requirements](docs/configuration.md#loopback-management-lo0). |
-| Partial result, timeout, or interrupted run | Read the report and inspect the tenant before another deployment. Completed resources are not rolled back. |
+| The page will not open | Check Docker is running. Run `docker compose ps` and `docker compose logs --tail 100 workspace`. |
+| You return to page 2 | Saved projects reopen their last view. New projects start at Reference site. |
+| VLAN files are requested after importing sites | Select the CSV files named in the `vlans_file` column. They are in the starter ZIP's `vlans` folder. |
+| Needs changes | Open the branch and correct the listed fields. |
+| Tenant connection fails | Check the API URL, key permissions, and whether your VPN/firewall allows Docker to reach the tenant. |
+| Existing site | Inspect that site in the tenant. This workflow creates new sites; it does not update existing ones. |
+| Partial, failed, or interrupted result | Download the report and inspect any resources already created before recovering the run. |
+| Loopback binding unverified | Check the management interface after appliance activation. See [management loopbacks](docs/configuration.md#loopback-management-lo0). |
+| Credential fields rejected | Remove credential columns from the CSV. Enter tenant credentials in the connection dialog. |
+| CSV export blocked for formula characters | Change the affected configuration text or column name so it does not begin with `=`, `+`, `-`, or `@`. |
 
-Use `--debug` for HTTP request/status diagnostics. Review console output before sharing it; reports intentionally omit raw API responses.
+## Current limits
 
-## Command reference
+- HA deployment from the browser is blocked while WAN and management mapping are being verified.
+- A project supports up to 500 sites and 10,000 VLANs. Deployment checks read a paginated inventory of up to 10,000 tenant sites; an incomplete or inconsistent result blocks creation. The reference-site picker currently lists the first 100 sites.
+- IPv6 configuration is not supported.
+- Management `lo0` binding on pending appliances and live traffic behavior need separate verification after activation.
+- Remote browser access, multiple operators sharing one workspace, automatic rollback, and automatic recovery are not supported.
 
-```bash
-python3 bulk_create.py --help
-python3 pull_site.py --help
-python3 pull_site.py --list-templates
-python3 pull_site.py --list-locations
-python3 -m unittest discover -s tests -v
-```
+The release review fixed the CSV export findings. The container still has upstream advisories awaiting packaged fixes; see the dated [security scan status](docs/docker.md#security-scan-status).
 
-Further documentation: [Configuration and export reference](docs/configuration.md) · [Optional ZPA provisioning](ZPA_PROVISIONING_README.md) · [Architecture and offline checks](docs/development.md)
+## More documentation
+
+- [Browser fields and behavior](docs/browser-workspace.md)
+- [Docker ports, credentials, backups, and upgrades](docs/docker.md)
+- [Python and CSV commands](docs/cli.md)
+- [Site and VLAN field reference](docs/configuration.md)
+- [ZPA provisioning](ZPA_PROVISIONING_README.md)
+- [Private-domain DNS](docs/private-domain-dns.md) and [UCaaS local breakout](docs/ucaas-local-breakout.md)
+- [Development and tests](docs/development.md)
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full terms.
+Source code is licensed under the [MIT License](LICENSE). Bundled fonts have their [own license](data/fonts/LICENSE.txt). Zscaler names, logos, and appliance images belong to Zscaler; see [asset sources](data/appliances/sources.json).

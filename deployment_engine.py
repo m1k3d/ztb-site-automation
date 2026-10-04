@@ -15,10 +15,16 @@ from api_client import ZTBClient
 from automation_config import Settings
 from input_validation import ValidationIssue, ValidationResult
 from location_config import prepare_location_context
-from site_payload import build_site_payload
+from site_payload import build_site_payload, check_template_settings, TemplateSettingsError
+from template_cloning import TemplateCloner, TemplateCloneError
+from ucaas_breakout import LocalBreakout, BreakoutError
+from dns_policy import DnsPolicy, DnsError
+from additional_wans import AdditionalWans
 
 POLL_RETRIES = 12
 POLL_DELAY_S = 2.0
+SITE_INVENTORY_LIMIT = 10_000
+SITE_INVENTORY_PAGE_SIZE = 100
 
 
 @dataclass
@@ -30,6 +36,11 @@ class PreparedSite:
     payload: dict
     template_id: str
     zpa_segment_plan: object = None
+    template_clone: object = None
+    ucaas_plan: object = None
+    dns_plan: object = None
+    additional_wans: list = field(default_factory=list)
+    template_settings: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -47,6 +58,15 @@ class SiteResult:
     stages: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     zpa_segments: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
+    template: dict = field(default_factory=dict)
+    ucaas: dict = field(default_factory=dict)
+    dns: dict = field(default_factory=dict)
+    additional_wans: dict = field(default_factory=dict)
+    site_id: str = ''
+    gateway_ids: list = field(default_factory=list)
+    diagram: dict = field(default_factory=dict)
+    artifacts: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -165,9 +185,17 @@ class DeploymentEngine:
         self.TEMPLATES = TemplateResolver(self.get_json_v3_templates, debug, emit)
         self.ZIA_LOCATIONS = LocationResolver(self.get_json_v3_locations, debug, emit)
         self.ZIA_LOCATION_TEMPLATES = LocationTemplateResolver(self.get_json_v3_location_templates, debug, emit)
+        self.template_cloner = TemplateCloner(self)
+        self.local_breakout = LocalBreakout(self)
+        self.dns_policy = DnsPolicy(self)
+        self.additional_wans = AdditionalWans(self)
 
     def log(self, *values):
         self._emit(" ".join(str(value) for value in values))
+
+    def get_template_settings(self, template_id):
+        detail = self.template_cloner.detail(template_id)
+        return {key: detail.get(key) for key in ('deployment_type', 'dhcp_service', 'platform_type')}
 
     def plan(self, validation: ValidationResult) -> DeploymentPlan:
         """Resolve every selected row before any deployment writes. Auth may refresh tokens."""
@@ -180,9 +208,14 @@ class DeploymentEngine:
         if plan.issues:
             return plan
         # Cache only within a single plan, not across subsequent runs.
+        self.dns_policy.planned_names.clear()
         self.TEMPLATES = TemplateResolver(self.get_json_v3_templates, self.DEBUG, self._emit)
         self.ZIA_LOCATIONS = LocationResolver(self.get_json_v3_locations, self.DEBUG, self._emit)
         self.ZIA_LOCATION_TEMPLATES = LocationTemplateResolver(self.get_json_v3_location_templates, self.DEBUG, self._emit)
+        self.template_cloner = TemplateCloner(self)
+        self.local_breakout = LocalBreakout(self)
+        clone_inventory = None
+        template_settings = {}
         for site in validation.sites:
             row = deepcopy(site.row)
             stage = "template_name/template_id"
@@ -191,13 +224,40 @@ class DeploymentEngine:
                 if not ok or not template_id:
                     raise ValueError(error or "template could not be resolved")
                 row["template_id"] = template_id
+                stage = 'template_settings'
+                if template_id not in template_settings:
+                    template_settings[template_id] = self.get_template_settings(template_id)
+                settings = template_settings[template_id]
+                check_template_settings(row, settings)
+                template_clone = None
+                if row.get("template_mode") == "clone":
+                    stage = "Template clone"
+                    if clone_inventory is None:
+                        clone_inventory = self.get_json_v3_templates()
+                    template_clone = self.template_cloner.plan(template_id, row["new_template_name"], clone_inventory)
                 stage = "location"
                 location = prepare_location_context(row, self.ZIA_LOCATIONS.resolve, self.ZIA_LOCATION_TEMPLATES.resolve)
                 stage = "site payload"
                 payload = build_site_payload(row, location)
                 stage = "ZPA segments"
                 segment_plan = zpa_segments.build_segment_plan(row["site_name"], site.vlans)
-                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan))
+                stage = "UCaaS local breakout"
+                ucaas_plan = self.local_breakout.plan(row, template_id)
+                stage = "DNS policy"
+                dns_plan = self.dns_policy.plan(row)
+                stage = 'Additional WANs'
+                wans = self.additional_wans.plan(row, template_id)
+                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan, template_clone, ucaas_plan, dns_plan, wans, deepcopy(settings)))
+            except TemplateSettingsError as exc:
+                plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
+            except DnsError as exc:
+                from dns_policy import MESSAGES
+                plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, MESSAGES[exc.code]))
+            except BreakoutError as exc:
+                from ucaas_breakout import MESSAGES
+                plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, MESSAGES[exc.code]))
+            except TemplateCloneError as exc:
+                plan.issues.append(ValidationIssue(site.source, site.row_number, "new_template_name", "A template with this name already exists. Choose a new name or use the existing template."))
             except (Exception, SystemExit) as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, stage, f"{row.get('site_name')}: {exc}"))
         if wants_zpa and not plan.issues:
@@ -208,11 +268,13 @@ class DeploymentEngine:
                     inventory = zpa_segments.load_inventory(plan.zpa_context)
                     zpa_segments.check_batch_conflicts(segments, inventory)
                     self.log(f"ZPA preflight: {len(inventory['application'])} existing application segment(s); {len(segments)} new disabled segment(s) planned. Confirm tenant entitlement before deployment.")
+            except zpa_segments.SegmentConflict as exc:
+                plan.issues.append(zpa_segments.SegmentConflictIssue("configuration", 0, "ZPA preflight", str(exc)))
             except (Exception, SystemExit) as exc:
                 plan.issues.append(ValidationIssue("configuration", 0, "ZPA preflight", str(exc)))
         return plan
 
-    def execute(self, plan: DeploymentPlan, *, dry_run=False) -> BatchResult:
+    def execute(self, plan: DeploymentPlan, *, dry_run=False, progress=None) -> BatchResult:
         """Execute a plan from this engine. Invalid plans cannot create resources."""
         if plan.owner is not self:
             raise ValueError("Use the same engine to plan and execute; re-plan after changing configuration")
@@ -222,21 +284,52 @@ class DeploymentEngine:
         if plan.issues and not dry_run:
             self.log("Preflight failed. No deployment resources were changed. Correct the errors and validate again.")
             return result
+        if not plan.sites:
+            return result
+        # Refresh on every execute (including after preview). Validation uses the
+        # same casefolded names as site_exists, so selected sites cannot collide
+        # with earlier creations in this batch. Separate operators are not locked.
+        try:
+            inventory = self.list_site_inventory()
+        except Exception:
+            inventory = None
         for site in plan.sites:
             row, name = site.row, site.row["site_name"]
+            def stage_progress(stage, state):
+                if progress is not None:
+                    progress(name, stage, state)
+            stage_progress("Existing site check", "running")
             try:
-                exists = self.site_exists(name)
+                if inventory is None:
+                    raise ValueError("Site inventory is unavailable")
+                exists = self.site_exists(name, inventory)
             except Exception:
-                result.sites.append(SiteResult(name, "lookup_failed", errors=["Cannot verify whether site exists; no changes made to this site."]))
+                stage_progress("Existing site check", "failed")
+                result.sites.append(SiteResult(name, "lookup_failed",
+                    diagnostics={"Existing site check": "inventory_unreadable"},
+                    errors=["Cannot verify whether site exists; no changes made to this site."]))
                 self.log(f"ERR : {name}: existence lookup failed; no changes made to this site.")
                 continue
             if exists:
+                stage_progress("Existing site check", "already exists")
                 result.sites.append(SiteResult(name, "already_exists", errors=["Site already exists; no changes made to this site."]))
                 self.log(f"STOP: {name}: already exists; no changes made to this site.")
                 continue
+            stage_progress("Existing site check", "success")
             if dry_run:
                 self.log(f"DRY: {name}: site-payload bytes={len(json.dumps(site.payload))}; VLANs={len(site.vlans)}; HA={bool(row.get('gateway_name_b'))}; ZPA={row.get('appc_provision') == '1'}")
                 preview = SiteResult(name, "preview")
+                if site.additional_wans:
+                    preview.additional_wans = dict(status='planned',requested=deepcopy(site.additional_wans))
+                if site.dns_plan:
+                    preview.dns = {**site.dns_plan.summary(), "status": "planned"}
+                    self.log(f"DRY: Split DNS: preserve Zscaler and ZPA priority; private domains before the catch-all; remaining domains to WAN DNS.")
+                if site.ucaas_plan:
+                    preview.ucaas = {**site.ucaas_plan.summary(), "status": "planned"}
+                    self.log(f"DRY: UCaaS local breakout: {', '.join(s['name'] for s in site.ucaas_plan.services)}; primary={site.ucaas_plan.primary}; secondary={site.ucaas_plan.secondary}; {site.ucaas_plan.summary()['path_selection']}; IPv4 address objects only; {sum(o['action'] == 'create' for o in site.ucaas_plan.objects)} object(s) to create; {len(site.ucaas_plan.rules)} port-specific site rules above template rules.")
+                if site.template_clone:
+                    preview.template = {**site.template_clone.summary(), "status": "planned"}
+                    self.log(f"DRY: Create template '{site.template_clone.name}' from '{site.template_clone.source_name}', then deploy site '{name}'.")
                 if site.zpa_segment_plan:
                     preview.zpa_segments = site.zpa_segment_plan.report()
                     preview.zpa_segments["status"] = "preview"
@@ -248,14 +341,39 @@ class DeploymentEngine:
                 entry.zpa_segments = site.zpa_segment_plan.report()
                 entry.zpa_segments["status"] = "blocked"
             result.sites.append(entry)
+            template_id = site.template_id
+            if site.template_clone:
+                stage_progress("Template clone", "running")
+                entry.template = {**site.template_clone.summary(), "status": "unconfirmed"}
+                try:
+                    template_id = self.template_cloner.create(site.template_clone)
+                except TemplateCloneError as exc:
+                    entry.stages["Template clone"] = False
+                    if exc.code in {"template_name_exists", "template_source_changed", "template_check_failed"}:
+                        entry.template["status"] = "blocked"
+                    entry.diagnostics["Template clone"] = exc.code
+                    entry.status = "template_failed"
+                    stage_progress("Template clone", "failed")
+                    stage_progress("Site", "blocked")
+                    entry.errors.append("Template creation or verification failed; site creation was not attempted.")
+                    self.log(f"STOP: {name}: {entry.errors[-1]} Inspect template '{site.template_clone.name}' before retrying.")
+                    continue
+                entry.template.update(id=template_id, status="created")
+                entry.stages["Template clone"] = True
+                entry.status = "template_only"
+                stage_progress("Template clone", "success")
+                self.log(f"OK  : {name}: created template '{site.template_clone.name}' ({template_id})")
+            stage_progress("Site", "running")
             try:
-                ok, message, cluster_hint = self.create_site(site.template_id, site.payload)
+                ok, message, cluster_hint = self.create_site(template_id, site.payload)
             except Exception as exc:
+                stage_progress("Site", "failed")
                 message = f"site create failed: {exc}. Creation outcome may be unknown; check the site before rerunning."
                 entry.errors.append(message)
                 self.log(f"ERR : {name}: {message}")
                 continue
             entry.stages["Site"] = bool(ok)
+            stage_progress("Site", "success" if ok else "failed")
             if not ok:
                 entry.errors.append(f"site create failed: {message}")
                 self.log(f"ERR : {name}: {entry.errors[-1]}")
@@ -263,17 +381,21 @@ class DeploymentEngine:
             entry.status = "partial"
             self.log(f"OK  : {name}: site created")
             try:
+                stage_progress("Gateway discovery", "running")
                 gateways, cluster_id = self.resolve_gateway_ids_and_cluster(name, prefer_cluster_id=cluster_hint, retries=POLL_RETRIES, delay=POLL_DELAY_S)
                 if not gateways or not cluster_id:
                     raise ValueError("gateway/cluster not ready; inspect the created site before rerunning")
+                entry.gateway_ids = gateways.split(',')
+                stage_progress("Gateway discovery", "success")
             except Exception as exc:
+                stage_progress("Gateway discovery", "failed")
                 entry.errors.append(f"site created but gateway/cluster lookup failed: {exc}")
                 self.log(f"ERR : {name}: {entry.errors[-1]}")
                 continue
             private_dns = row.get("private_dns", "")
             is_ha = len(gateways.split(",")) > 1
             site_id = None  # Never carry another row's target forward.
-            if private_dns or site.vlans or is_ha:
+            if private_dns or site.vlans or is_ha or site.dns_plan or site.additional_wans:
                 try:
                     site_id = self.resolve_site_id(name)
                 except Exception as exc:
@@ -282,25 +404,61 @@ class DeploymentEngine:
                     entry.errors.append("site ID unavailable; dependent stages cannot run")
                     self.log(f"ERR : {name}: {entry.errors[-1]}")
             actions = []
+            entry.site_id = site_id or ''
+            if site.additional_wans:
+                actions.append(('Additional WANs', lambda: bool(site_id) and self.additional_wans.apply(
+                    site.additional_wans,site_id,gateways,cluster_id,row,entry.additional_wans)))
+            if site.ucaas_plan:
+                def configure_breakout():
+                    if site.additional_wans and not entry.stages.get('Additional WANs'):
+                        return False
+                    try:
+                        return self.local_breakout.apply(site.ucaas_plan, gateways, name, entry.ucaas)
+                    except BreakoutError as exc:
+                        entry.diagnostics["UCaaS local breakout"] = exc.code
+                        return False
+                actions.append(("UCaaS local breakout", configure_breakout))
             if private_dns:
                 actions.append(("Private DNS", lambda: bool(site_id) and self.configure_private_dns(site_id, private_dns)))
+            if site.dns_plan:
+                def configure_dns():
+                    entry.dns.update(site.dns_plan.summary(), status="blocked")
+                    if not site_id or not entry.stages.get("Private DNS"):
+                        entry.diagnostics["DNS policy"] = "dns_prerequisite"
+                        return False
+                    try:
+                        return self.dns_policy.apply(site.dns_plan, site_id, entry.dns)
+                    except DnsError as exc:
+                        entry.diagnostics["DNS policy"] = exc.code
+                        return False
+                actions.append(("DNS policy", configure_dns))
             if site.vlans:
-                actions.append(("VLANs", lambda: bool(site_id) and self.process_vlans_for_site(site_id, gateways, cluster_id, site.vlans, row)))
+                actions.append(("VLANs", lambda: bool(site_id) and self.process_vlans_for_site(site_id, gateways, cluster_id, site.vlans, row, diagnostics=entry.diagnostics)))
             if is_ha:
                 actions.append(("VRRP", lambda: bool(site_id) and self.configure_vrrp(gateways, cluster_id, site.vlans, row, site_id)))
             if row.get("appc_provision") == "1":
                 resources = entry.zpa_segments.get("resources") if site.zpa_segment_plan else None
                 actions.append(("ZPA", lambda: zpa_provisioning.provision_zpa_for_site(row, self.client, self.client.base_root, cluster_id=cluster_id, config=self.config, context=plan.zpa_context, resources=resources)))
             for stage, action in actions:
+                stage_progress(stage, "running")
                 entry.stages[stage] = self.run_site_stage(name, stage, action)
+                stage_progress(stage, "success" if entry.stages[stage] else "failed")
+                if stage == "VLANs" and entry.diagnostics.get("Loopback binding"):
+                    # Pending management binding must not masquerade as a LAN
+                    # configuration failure and block disabled ZPA staging.
+                    entry.stages["Loopback binding"] = False
+                    stage_progress("Loopback binding", "failed")
             if site.zpa_segment_plan:
                 if entry.stages.get("ZPA") and entry.stages.get("VLANs"):
+                    stage_progress("ZPA segments", "running")
                     connector_id = entry.zpa_segments["resources"].get("appConnectorGroup", {}).get("id")
                     entry.stages["ZPA segments"] = self.run_site_stage(name, "ZPA segments", lambda: zpa_segments.stage_segments(
                         plan.zpa_context, site.zpa_segment_plan, connector_id, entry.zpa_segments, emit=self.log,
                     ))
+                    stage_progress("ZPA segments", "success" if entry.stages["ZPA segments"] else "failed")
                 else:
                     entry.stages["ZPA segments"] = False
+                    entry.diagnostics["ZPA segments"] = "prerequisite_failed"
                     self.log(f"ERR : {name}: ZPA segments blocked because VLAN or App Connector provisioning did not complete")
             incomplete = [stage for stage, success in entry.stages.items() if not success]
             if incomplete:
@@ -312,7 +470,7 @@ class DeploymentEngine:
         good = sum(s.status in ("success", "preview") for s in result.sites)
         bad = len(result.sites) - good + len(result.issues)
         self.log(f"\nDone. {'Preview' if dry_run else 'Deployment'}: OK={good} ERR={bad}")
-        if not dry_run and any(s.status in ("partial", "failed") for s in result.sites):
+        if not dry_run and any(s.status in ("partial", "failed", "template_only", "template_failed") for s in result.sites):
             self.log("Some sites may be partially configured. Check reported errors and existing resources before rerunning; automatic resume is not yet supported.")
         return result
 
@@ -385,23 +543,7 @@ class DeploymentEngine:
 
 
     def get_json_v3_templates(self) -> List[Dict[str, Any]]:
-        headers = self._v3_headers()
-        base = f"{self.API_V3}/templates"
-        try:
-            data = self.get_json(base, headers=headers)
-        except RuntimeError as e:
-            if "404" in str(e) or "405" in str(e):
-                data = self.get_json(base + "/", headers=headers)
-            else:
-                raise
-        if isinstance(data, dict):
-            if isinstance(data.get("result"), list):
-                return data["result"]
-            if isinstance(data.get("result"), dict) and isinstance(data["result"].get("rows"), list):
-                return data["result"]["rows"]
-        if isinstance(data, list):
-            return data
-        raise ValueError("Template response must contain a list, result list, or result.rows list")
+        return self.template_cloner.inventory()
 
 
     def ensure_template_id_for_row(self, row: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -476,44 +618,103 @@ class DeploymentEngine:
         return self.get_json_v3_gateway(params)
 
 
-    def find_site_row_by_name(self, site_name: str) -> Optional[Dict[str, Any]]:
-        data = self.get_json_v3_gateway_list(site_name)
-        rows = data.get("rows") or data.get("result",{}).get("rows",[]) or []
-        wanted = site_name.strip().lower()
-        for r in rows:
-            nm = (r.get("location_display_name") or r.get("site_name") or r.get("location") or "").strip().lower()
-            if nm == wanted:
-                return r
-        return None
+    @staticmethod
+    def _inventory_names(row):
+        if not isinstance(row, dict):
+            raise ValueError("Invalid site inventory row")
+        names = tuple(sorted({value.strip().casefold()
+            for key in ("location_display_name", "site_name", "location")
+            if isinstance(value := row.get(key), str) and value.strip()}))
+        if not names:
+            raise ValueError("Site inventory row has no name")
+        return names
 
-    def site_exists(self, site_name: str) -> bool:
-        """Fail closed when the inventory cannot establish absence.
+    @classmethod
+    def _inventory_key(cls, row):
+        names = cls._inventory_names(row)
+        cluster = row.get("cluster_info") or {}
+        if not isinstance(cluster, dict):
+            raise ValueError("Invalid site inventory cluster")
+        identifier = cluster.get("site_id") or row.get("site_id") or row.get("id")
+        if identifier is None or identifier == "":
+            return ("names", names)
+        if isinstance(identifier, bool) or not isinstance(identifier, (str, int)) or not str(identifier).strip():
+            raise ValueError("Invalid site inventory identity")
+        return ("id", str(identifier).strip())
 
-        Use an unfiltered inventory: server search matching may differ from our
-        case-insensitive exact comparison. Large inventories need pagination;
-        until supported, refuse to infer absence from a potentially partial page.
-        """
-        data = self.get_json_v3_gateway_list("")
+    @staticmethod
+    def _inventory_page(data):
         body = data.get("result", data) if isinstance(data, dict) else None
         rows = body.get("rows") if isinstance(body, dict) else None
         if not isinstance(rows, list):
             raise ValueError("Unrecognized site inventory")
-        wanted = site_name.strip().casefold()
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("Invalid site inventory row")
-            names = [row.get(key) for key in ("location_display_name", "site_name", "location")]
-            if not any(isinstance(name, str) and name.strip() for name in names):
-                raise ValueError("Site inventory row has no name")
-            if any(isinstance(name, str) and name.strip().casefold() == wanted for name in names):
-                return True
-        if len(rows) >= 100:
-            raise ValueError("Site inventory may be truncated")
+        totals = set()
         for container in (data, body):
             for key in ("total", "total_count", "totalCount", "count"):
-                if key in container and int(container[key]) > len(rows):
+                if key not in container:
+                    continue
+                value = container[key]
+                if isinstance(value, bool) or not isinstance(value, (str, int)) or not re.fullmatch(r"[0-9]+", str(value)):
+                    raise ValueError("Invalid site inventory total")
+                totals.add(int(value))
+        if len(totals) > 1:
+            raise ValueError("Conflicting site inventory totals")
+        return rows, next(iter(totals), None)
+
+    def list_site_inventory(self, search=""):
+        """Read all pages or fail; a partial inventory must never authorize creation.
+
+        Gateway's zero-based pages and total `count` were checked with live GETs.
+        Always fetch past a full page, even when a reported total says to stop.
+        This detects page-local counts and APIs that ignore the page parameter.
+        """
+        rows, seen, expected = [], set(), None
+        size = SITE_INVENTORY_PAGE_SIZE
+        # One extra page establishes completion at the exact supported limit.
+        for page in range(SITE_INVENTORY_LIMIT // size + 1):
+            data = self.get_json_v3_gateway(dict(gateway_type="isolation", template_id="", sortdir="asc",
+                sort="location", search=search, page=page, limit=size, refresh_token="enabled"))
+            page_rows, total = self._inventory_page(data)
+            if page and total != expected:
+                raise ValueError("Site inventory changed while reading")
+            expected = total
+            if len(page_rows) > size:
+                raise ValueError("Site inventory ignored the page size")
+            if len(rows) + len(page_rows) > SITE_INVENTORY_LIMIT or (total is not None and total > SITE_INVENTORY_LIMIT):
+                raise ValueError("Site inventory exceeds the supported size")
+            if page == 1 and not rows and page_rows:
+                raise ValueError("Site inventory returned an empty first page")
+            for row in page_rows:
+                key = self._inventory_key(row)
+                if key in seen:
+                    raise ValueError("Site inventory repeated a row or page")
+                seen.add(key)
+                rows.append(row)
+            if total is not None and len(rows) > total:
+                raise ValueError("Site inventory exceeds its reported total")
+            if not page_rows and page == 0:
+                # Do not mistake an invalid zero page on a one-based API for an
+                # empty tenant. The following page must also be empty.
+                continue
+            if len(page_rows) < size:
+                if total is not None and len(rows) != total:
                     raise ValueError("Site inventory is incomplete")
-        return False
+                return rows
+        raise ValueError("Site inventory exceeds the supported size")
+
+    def find_site_row_by_name(self, site_name: str) -> Optional[Dict[str, Any]]:
+        wanted = site_name.strip().casefold()
+        for row in self.list_site_inventory(search=site_name):
+            if wanted in self._inventory_names(row):
+                return row
+        return None
+
+    def site_exists(self, site_name: str, inventory=None) -> bool:
+        # Never use server search to establish absence: its matching may differ
+        # from our exact case-insensitive comparison.
+        rows = self.list_site_inventory() if inventory is None else inventory
+        wanted = site_name.strip().casefold()
+        return any(wanted in self._inventory_names(row) for row in rows)
 
 
     def get_gateway_detail_v3(self, gateway_id: str) -> Dict[str, Any]:
@@ -850,6 +1051,7 @@ class DeploymentEngine:
 
 
     def vlan_to_v2_payload(self, vlan: Dict[str, Any], gateways_str: str, cluster_id: int, per_network_dns: str = "") -> Dict[str, Any]:
+        dhcp_service = self.norm_dhcp_service(vlan.get("dhcp_service", ""), bool(vlan.get("dhcp_range")))
         start_ip = vlan.get("start_ip") or vlan.get("default_gateway") or ""
         subnet   = str(vlan.get("subnet") or "").strip()
         ip_range = self._network_base_from_start(start_ip, subnet) or vlan.get("ip_range") or ""
@@ -862,9 +1064,9 @@ class DeploymentEngine:
             "display_name": display,
             "ip_range": ip_range,
             "zone": vlan.get("zone") or "LAN Zone",
-            "per_network_dns": (per_network_dns or "").strip(),
+            "per_network_dns": self.vlan_dns(vlan, per_network_dns),
             "dns_forwarding": False,
-            "dhcp_range": vlan.get("dhcp_range", ""),
+            "dhcp_range": "" if dhcp_service == "no_dhcp" else vlan.get("dhcp_range", ""),
             "slash30_range": "",
             "airgap_plus_mask": 30,
             "default_gateway": start_ip,
@@ -873,11 +1075,15 @@ class DeploymentEngine:
             "name": safe_name,
             "cluster_id": int(cluster_id),
             "event_type": "addnetwork",
-            "dhcp_service": self.norm_dhcp_service(vlan.get("dhcp_service",""), bool(vlan.get("dhcp_range"))),
+            "dhcp_service": dhcp_service,
             "share_over_vpn": bool(vlan.get("share_over_vpn", False)),
             "enabled": bool(vlan.get("enabled", True)),
         }
 
+
+    @staticmethod
+    def vlan_dns(vlan: Dict[str, Any], fallback: str = "") -> str:
+        return (vlan.get("per_network_dns") or fallback or "").strip()
 
     def post_vlan(self, vlan_payload: Dict[str, Any]) -> Tuple[bool, str]:
         url = f"{self.API_V2}/Network/?refresh_token=enabled"
@@ -973,40 +1179,70 @@ class DeploymentEngine:
             return False
 
 
-    def process_vlans_for_site(self, site_id: str, gw_ids: str, cluster_id: int, vlans: list, row: Dict[str, str], dry_run: bool = False) -> bool:
+    def vlan_gateway_targets(self, site_id, gw_ids, vlans, row):
+        """Resolve A/B by their requested names, never by API list order."""
+        result = {id(v): gw_ids for v in vlans}
+        scoped = [v for v in vlans if v.get('gateway_target', 'all') not in ('', 'all')]
+        if not scoped:
+            return result
+        native = self.find_site_row_by_name(row['site_name'])
+        cluster = (native or {}).get('cluster_info') or {}
+        if str(cluster.get('site_id') or (native or {}).get('site_id') or '') != str(site_id):
+            raise ValueError('Cannot verify the site for gateway-specific networks')
+        gateways = native.get('gateways') or cluster.get('gateways') or []
+        expected_ids = {g.strip() for g in gw_ids.split(',')}
+        for v in scoped:
+            target = v['gateway_target']
+            if target not in ('a', 'b'):
+                raise ValueError('Invalid network gateway assignment')
+            name = row.get('gateway_name' if target == 'a' else 'gateway_name_b')
+            matches = [g['gateway_id'] for g in gateways if name and g.get('gateway_name') == name
+                       and g.get('gateway_id') in expected_ids]
+            if len(matches) != 1:
+                raise ValueError('Cannot uniquely resolve the network gateway assignment')
+            result[id(v)] = matches[0]
+        return result
+
+    def process_vlans_for_site(self, site_id: str, gw_ids: str, cluster_id: int, vlans: list, row: Dict[str, str], dry_run: bool = False, *, diagnostics=None) -> bool:
         if not vlans:
             return True
-        if any("lo0" in {p.strip().lower() for p in v.get("interface", "").split(",")} for v in vlans):
-            # An accepted network POST is not proof of an interface binding.
-            # The API can retain the literal "lo0" with no gateway association
-            # when the target gateway does not yet have a loopback interface.
-            inventory = self.get_gateway_interfaces_v2(site_id)
-            for gateway_id in (g.strip() for g in gw_ids.split(",")):
-                matches = [i for g in inventory if g.get("gateway_id") == gateway_id
-                           for i in g.get("interfaces", [])
-                           if str(i.get("name", "")).lower() == "lo0" and i.get("id")]
-                if len(matches) != 1:
-                    self.log(f"ERR : loopback lo0 is unavailable or ambiguous on gateway {gateway_id}; no VLAN writes performed. Verify gateway activation and interface configuration before retrying.")
-                    return False
+        def is_loopback(vlan):
+            return "lo0" in {p.strip().lower() for p in vlan.get("interface", "").split(",")}
+
+        loopback_requested = any(is_loopback(v) for v in vlans)
+        loopback_post_failed = False
+        posted = []
         self.log(f"   Processing {len(vlans)} validated VLANs...")
+        targets = self.vlan_gateway_targets(site_id, gw_ids, vlans, row)
+        # Only newly accepted loopback records may be enabled without a resolved
+        # interface. Preserve a separate incomplete binding stage until lo0 exists.
+        prior_ids = {v.get('id') for v in self.list_site_vlans_v2(site_id)} if any(
+            is_loopback(v) and v.get('gateway_target') in ('a','b') for v in vlans) and not dry_run else set()
 
         # Use wan_dns as default for per_network_dns if not specified
         per_net_dns = (row.get("wan_dns") or "").strip()
 
         vlan_ok = 0; vlan_fail = 0
         for v in vlans:
-            v2_payload = self.vlan_to_v2_payload(v, gw_ids, cluster_id, per_network_dns=per_net_dns)
+            v2_payload = self.vlan_to_v2_payload(v, targets[id(v)], cluster_id, per_network_dns=per_net_dns)
 
             if dry_run:
                  self.log(f"   [DRY-RUN] Would POST VLAN {v.get('name')} tag={v.get('tag')}")
                  vlan_ok += 1
                  continue
 
-            okv, m = self.post_vlan(v2_payload)
+            try:
+                okv, m = self.post_vlan(v2_payload)
+            except Exception:
+                # A timeout has an uncertain outcome. Do not retry the POST, but
+                # allow independent VLANs to be attempted.
+                okv, m = False, "Network creation request failed; inspect the tenant before recovery."
             if okv:
                 vlan_ok += 1
+                posted.append(v)
             else:
                 vlan_fail += 1
+                loopback_post_failed |= is_loopback(v)
                 self.log(f"    ❌ VLAN ERR: {m}")
 
         success = vlan_fail == 0
@@ -1017,10 +1253,45 @@ class DeploymentEngine:
         if dry_run:
             return success
 
+        if loopback_requested:
+            # Staging can accept lo0 before it appears in gateway inventory.
+            # Check after all POSTs so it cannot block the other LAN networks.
+            loopback_available = False
+            try:
+                inventory = self.get_gateway_interfaces_v2(site_id)
+                loopback_available = all(
+                    len([i for g in inventory if g.get("gateway_id") == gateway_id
+                         for i in g.get("interfaces", [])
+                         if str(i.get("name", "")).lower() == "lo0" and i.get("id")]) == 1
+                    for gateway_id in {g.strip() for v in vlans if is_loopback(v) for g in targets[id(v)].split(',')})
+            except Exception:
+                pass  # Unavailable inventory cannot confirm loopback readiness.
+            if loopback_post_failed or not loopback_available:
+                code = "loopback_submission_failed" if loopback_post_failed else "loopback_binding_unverified"
+                if diagnostics is not None:
+                    diagnostics["VLANs" if loopback_post_failed else "Loopback binding"] = code
+                self.log("WARN: loopback submission failed or its outcome is uncertain; other VLANs were attempted."
+                         if loopback_post_failed else
+                         "WARN: loopback network accepted for staging; lo0 binding is unverified. Check after activation. Other VLANs were attempted.")
+                # POST failures already set success=False. Unverified binding
+                # is reported separately by execute(); preserve the actual
+                # VLAN operation outcome for downstream dependencies.
+
         current = self.list_site_vlans_v2(str(site_id))
         id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {self._vlan_key(v): v for v in current}
 
         def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
+            if csv_vlan.get('gateway_target', 'all') not in ('', 'all'):
+                matches = [v for v in current if v.get('gateway_id') == targets[id(csv_vlan)]
+                           and self._vlan_key(v) == self._vlan_key(csv_vlan) and v.get('id')]
+                if not matches and is_loopback(csv_vlan):
+                    matches = [v for v in current if v.get('id') and v['id'] not in prior_ids
+                               and not v.get('gateway_id') and not v.get('interface')
+                               and (v.get('display_name') or v.get('name')) == csv_vlan['name']
+                               and str(v.get('tag')) == str(csv_vlan['tag'])
+                               and v.get('default_gateway') == csv_vlan['default_gateway']
+                               and str(v.get('subnet')) == '32' and v.get('zone') == csv_vlan['zone']]
+                return matches[0]['id'] if len(matches) == 1 else None
             k = self._vlan_key(csv_vlan)
             hit = id_map.get(k)
             if hit and hit.get("id"):
@@ -1041,7 +1312,7 @@ class DeploymentEngine:
         }
 
         # a) Enable (PUT status="provisioned")
-        for v in vlans:
+        for v in posted:
             if not v.get("enabled", True):
                 continue
             vid = find_id_for(v)
@@ -1055,7 +1326,7 @@ class DeploymentEngine:
             payload = {
                 "name": v.get("display_name") or v.get("name") or "",
                 "subnet": str(v.get("subnet") or ""),
-                "per_network_dns": (per_net_dns or ""),
+                "per_network_dns": self.vlan_dns(v, per_net_dns),
                 "status": "provisioned",
             }
             try:
@@ -1071,7 +1342,7 @@ class DeploymentEngine:
                 success = False
 
         # b) share_over_vpn (PATCH)
-        for v in vlans:
+        for v in posted:
             if not v.get("share_over_vpn", False):
                 continue
             vid = find_id_for(v)

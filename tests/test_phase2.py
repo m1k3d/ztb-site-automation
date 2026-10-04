@@ -147,7 +147,9 @@ class PreflightTests(OfflineTests):
     def setUp(self):
         super().setUp()
         self.engine = DeploymentEngine(Settings(ztb_api_base="https://example.invalid", bearer="offline"), emit=lambda _: None)
+        self.engine.get_template_settings = Mock(return_value={"deployment_type":"standalone", "dhcp_service":"server"})
         self.addCleanup(self.engine.client.close)
+        self.stack.enter_context(patch.object(self.engine, "list_site_inventory", return_value=[]))
         self.stack.enter_context(patch.object(self.engine, "site_exists", return_value=False))
         self.create = self.stack.enter_context(patch.object(self.engine, "create_site", return_value=(True, "created", None)))
         self.lookup = self.stack.enter_context(patch.object(self.engine, "resolve_gateway_ids_and_cluster", return_value=("gw", 123)))
@@ -186,6 +188,7 @@ class PreflightTests(OfflineTests):
             ztb_api_base="https://example.invalid", bearer="offline", zpa_base_url="https://config.example.invalid",
             zpa_client_id="dummy", zpa_client_secret="dummy",
         ), emit=lambda _: None)
+        engine.get_template_settings = Mock(return_value={'deployment_type':'standalone', 'dhcp_service':'server'})
         self.addCleanup(engine.client.close)
         with patch("zpa_provisioning.prepare_zpa", side_effect=ValueError("certificate unavailable")), patch.object(engine, "create_site") as create:
             result = engine.run(validate_rows([site(), site("Later", appc_provision="1")]))
@@ -237,6 +240,7 @@ class PreflightTests(OfflineTests):
         self.assertEqual(plan.sites[0].vlans[0]["tag"], "10")
         self.assertEqual(plan.sites[0].payload["name"], "Branch")
         other = DeploymentEngine(self.engine.config, emit=lambda _: None)
+        self.engine.get_template_settings = Mock(return_value={"deployment_type":"standalone", "dhcp_service":"server"})
         self.addCleanup(other.client.close)
         with self.assertRaisesRegex(ValueError, "same engine"):
             other.execute(plan)

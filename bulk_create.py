@@ -6,6 +6,8 @@ from automation_config import Settings
 from deployment_engine import DeploymentEngine
 from input_validation import validate_csv
 from run_report import reserve_report, save_report
+from site_diagrams import capture_results
+from diagram_store import DiagramStore
 
 
 def main(argv=None):
@@ -40,7 +42,14 @@ def main(argv=None):
         try:
             report_path = reserve_report(args.report_dir)
             print(f"Run report: {report_path}")
-            result = engine.run(validation, dry_run=args.dry_run)
+            plan = engine.plan(validation)
+            result = engine.execute(plan, dry_run=args.dry_run)
+            if not args.dry_run:
+                capture_results(engine, plan, result)
+                try:
+                    DiagramStore(args.report_dir).save(report_path, result)
+                except Exception:
+                    print('Diagram files could not be saved. Deployment outcome is unchanged.')
             save_report(report_path, result, dry_run=args.dry_run)
             return result.exit_code
         finally:

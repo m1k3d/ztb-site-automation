@@ -4,6 +4,7 @@ __pycache__/
 
 # Virtual environment
 .venv/
+.venv-*/
 env/
 venv/
 
@@ -28,4 +29,10 @@ archive/
 # Local working files
 /sites.csv
 /vlans/
+/backups/
+compose.*.local.yaml
 .~lock.*#
+
+# Local development handoffs (not user documentation)
+/docs/progress-checkpoint.md
+/docs/next-fixes.md

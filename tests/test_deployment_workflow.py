@@ -41,7 +41,9 @@ class DeploymentWorkflowTests(unittest.TestCase):
             "subprocess.run", side_effect=AssertionError("Unexpected login subprocess")
         ))
         self.mock("time.sleep")
+        self.mock("list_site_inventory", return_value=[])
         self.mock("site_exists", return_value=False)
+        self.template_settings = self.mock('get_template_settings', return_value={'deployment_type':'standard_mode_ha', 'dhcp_service':'server'})
         self.create = self.mock("create_site", return_value=(True, "created", None))
         self.gateways = self.mock(
             "resolve_gateway_ids_and_cluster",
@@ -242,6 +244,7 @@ class DeploymentWorkflowTests(unittest.TestCase):
                 self.assertIn("fixture stage timeout", output)
 
     def test_no_optional_stages_is_success(self):
+        self.template_settings.return_value = {'deployment_type':'standalone', 'dhcp_service':'server'}
         self.gateways.side_effect = None
         self.gateways.return_value = ("standalone-gw", 123)
         status, output = self.run_batch([self.row(

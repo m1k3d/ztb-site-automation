@@ -13,6 +13,7 @@ import base64
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from automation_config import Settings, normalize_base
+from country_catalog import resolve_country
 
 # Import zpa_login to ensure we can get a token
 try:
@@ -28,7 +29,7 @@ def get_zpa_headers(token: str) -> Dict[str, str]:
         "Authorization": f"Bearer {token}"
     }
 
-def get_customer_id(token: str) -> str:
+def get_customer_id(token: str, *, quiet: bool = False) -> str:
     """
     Extracts the Customer ID (custId) from the JWT token.
     """
@@ -44,10 +45,11 @@ def get_customer_id(token: str) -> str:
         claims = json.loads(decoded)
         return str(claims.get("custId", ""))
     except Exception as e:
-        print(f"❌ Failed to extract Customer ID from token: {e}", file=sys.stderr)
+        if not quiet:
+            print(f"❌ Failed to extract Customer ID from token: {e}", file=sys.stderr)
         return ""
 
-def get_enrollment_cert_id(base_url: str, customer_id: str, token: str, cert_name: str = "Connector") -> Optional[str]:
+def get_enrollment_cert_id(base_url: str, customer_id: str, token: str, cert_name: str = "Connector", *, quiet: bool = False) -> Optional[str]:
     """
     Fetches the enrollment certificate ID by name.
     Default is "Connector" which is the standard signing certificate.
@@ -81,11 +83,12 @@ def get_enrollment_cert_id(base_url: str, customer_id: str, token: str, cert_nam
             # A named certificate is a requirement, not a suggestion.
             
         except Exception as e:
-            if "404" not in str(e):
+            if not quiet and "404" not in str(e):
                 print(f"   ⚠️  Error fetching from {url}: {e}", file=sys.stderr)
             continue
     
-    print(f"   ⚠️  Failed to fetch enrollment certificates from all endpoints", file=sys.stderr)
+    if not quiet:
+        print(f"   ⚠️  Failed to fetch enrollment certificates from all endpoints", file=sys.stderr)
     return None
 
 def get_app_connector_group_id(base_url: str, customer_id: str, token: str, group_name: Optional[str] = None) -> Optional[str]:
@@ -173,6 +176,9 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
     """
     if not str(enrollment_cert_id or "").strip():
         raise ValueError("App Connector Group requires the resolved enrollment certificate ID")
+    country_info = resolve_country(country) if country.strip() else None
+    if country_info:
+        country = country_info["name"]
     if dry_run:
         print(f"   [DRY-RUN] Would create App Connector Group: name='{name}', location='{city}, {country}'")
         return "dry-run-group-id-123"
@@ -185,20 +191,6 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
     lat, lon = get_geo_location(city, country)
     location_str = f"{city}, {country}" if city and country else (city or country or "Unknown")
     
-    # Map country to Code if possible
-    country_code = "NL" # generic default from original code
-    c_lower = country.lower()
-    if c_lower in ("united states", "usa", "us"): country_code = "US"
-    elif c_lower in ("united kingdom", "uk", "gb"): country_code = "GB"
-    elif c_lower in ("germany", "de"): country_code = "DE"
-    elif c_lower in ("france", "fr"): country_code = "FR"
-    elif c_lower in ("australia", "au"): country_code = "AU"
-    elif c_lower in ("canada", "ca"): country_code = "CA"
-    elif c_lower in ("india", "in"): country_code = "IN"
-    elif c_lower in ("japan", "jp"): country_code = "JP"
-    elif c_lower in ("singapore", "sg"): country_code = "SG"
-    elif c_lower in ("switzerland", "ch"): country_code = "CH"
-
     payload = {
         "name": name,
         # The API calls this signingCertId in validation errors, but the
@@ -207,7 +199,6 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
         "description": f"Auto-created for {name}",
         "enabled": True,
         "cityCountry": location_str,
-        "countryCode": country_code,
         "latitude": lat,
         "longitude": lon,
         "location": location_str,
@@ -220,6 +211,9 @@ def create_app_connector_group(base_url: str, customer_id: str, token: str, name
         "wafDisabled": False
     }
     
+    if country_info:
+        payload["countryCode"] = country_info["code"]
+
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
@@ -314,20 +308,20 @@ class ZPAContext:
     enrollment_cert_id: str
 
 
-def prepare_zpa(config: Settings) -> ZPAContext:
+def prepare_zpa(config: Settings, *, write_env: bool = True, quiet: bool = False) -> ZPAContext:
     """Authenticate and resolve requirements without creating groups or keys."""
     errors = config.errors(require_ztb=False, require_zpa=True)
     if errors:
         raise ValueError("; ".join(errors))
-    token, _ = zpa_login.zpa_login(config=config, write_env=True, quiet=True)
+    token, _ = zpa_login.zpa_login(config=config, write_env=write_env, quiet=True)
     base = normalize_base(config.zpa_base_url, zpa=True)
-    token_customer = get_customer_id(token)
+    token_customer = get_customer_id(token, quiet=quiet)
     if config.zpa_customer_id and token_customer and config.zpa_customer_id != token_customer:
         raise ValueError("ZPA_CUSTOMER_ID does not match the authenticated token customer")
     customer_id = config.zpa_customer_id or token_customer
     if not customer_id:
         raise ValueError("ZPA_CUSTOMER_ID: required when the token has no custId")
-    certificate = get_enrollment_cert_id(base, customer_id, token, config.zpa_enrollment_cert_name)
+    certificate = get_enrollment_cert_id(base, customer_id, token, config.zpa_enrollment_cert_name, quiet=quiet)
     if not certificate:
         raise ValueError(f"ZPA_ENROLLMENT_CERT_NAME: could not resolve '{config.zpa_enrollment_cert_name}'")
     return ZPAContext(base, customer_id, token, certificate)

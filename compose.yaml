@@ -1,0 +1,23 @@
+services:
+  workspace:
+    build: .
+    image: ztb-site-automation:local
+    init: true
+    ports:
+      - "127.0.0.1:${ZTB_PORT:-8765}:${ZTB_PORT:-8765}"
+    environment:
+      ZTB_PORT: "${ZTB_PORT:-8765}"
+      ZTB_DATA_DIR: /data
+    volumes:
+      - workspace-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10m
+
+volumes:
+  workspace-data:

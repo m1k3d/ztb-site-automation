@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="local-token" content="__LOCAL_TOKEN__">
+  <title>Zero Trust Branch · Site Automation</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/rollout.css">
+  <script src="/network.js" defer></script>
+  <script src="/country-picker.js" defer></script>
+  <script src="/interface-picker.js" defer></script>
+  <script src="/projects.js" defer></script>
+  <script src="/diagrams.js" defer></script>
+  <script src="/rollout.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Zero Trust Branch Site Automation home"><span class="brand-name">Zero Trust Branch<span class="brand-sub">Site Automation</span></span></a>
+    <div class="nav-label">WORKSPACE</div>
+    <nav aria-label="Workspace"><button class="nav-item" id="nav-reference"><span>01</span>Reference site</button><button class="nav-item active" id="nav-sites"><span>02</span>New branches</button><button class="nav-item" id="nav-review"><span>03</span>Review rollout</button></nav>
+    <div class="help-access"><button id="help-open" type="button" aria-haspopup="dialog"><span aria-hidden="true">?</span>How to use</button></div>
+  </aside>
+  <div class="shell">
+    <header class="topbar"><div><span class="breadcrumb">Workspace</span><span class="slash">/</span><span id="page-label">Sites &amp; VLANs</span></div><div class="topbar-actions"><span class="local-label">Local</span><button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 14a8.4 8.4 0 0 1-10-10A8.5 8.5 0 1 0 20 14Z"/></svg>Dark mode</button></div></header>
+    <main>
+      <section id="project-bar" class="project-bar" aria-label="Saved rollout project">
+        <label>Rollout project<input id="project-name" maxlength="120" placeholder="Name your rollout" aria-label="Rollout project name" disabled></label>
+        <div class="project-save"><span id="project-save-status" role="status">Opening your workspace…</span><button id="project-save-retry" class="text-button" hidden>Retry save</button></div>
+        <div class="project-actions"><button id="project-new" class="button">New project</button><button id="project-open" class="button">Open project</button><button id="project-copy" class="text-button" disabled>Save as copy</button></div>
+      </section>
+      <div id="notice" class="notice" role="status" hidden></div>
+        <div id="import-pending" class="import-pending" hidden><p id="import-message"></p><div><button id="import-more" class="button">Choose VLAN CSVs</button><button id="import-cancel" class="text-button">Cancel import</button></div></div>
+      <section id="reference-view" hidden>
+        <div class="page-heading"><div><h1>Reference site</h1><p class="subtitle">Choose the configuration for your new branches.</p></div><button id="reference-pull" class="button primary">Pull reference site</button></div>
+        <div id="reference-cards"></div>
+        <div class="reference-start"><h2>Start your rollout</h2><p>Pull a working site from your tenant, or prepare branches from a CSV or blank configuration.</p><div class="heading-actions"><button id="reference-import" class="button">Import CSVs</button><button type="button" class="text-button csv-template-link" data-csv-templates>CSV templates</button><button id="reference-blank" class="button">Add blank branch</button><button id="reference-example" class="text-button">Load an example rollout</button></div></div>
+      </section>
+      <section id="overview-view" hidden>
+        <div class="page-heading"><div><h1>Rollout overview</h1><p class="subtitle">Select branches to review.</p></div><div class="heading-actions"><button id="overview-import" class="button">Import CSVs</button><button type="button" class="text-button csv-template-link" data-csv-templates>CSV templates</button><button id="overview-add" class="button">Add blank branch</button><button id="overview-create" class="button primary">Create branches</button></div></div>
+        <div id="rollout-summary" class="rollout-summary" aria-live="polite"></div>
+        <section class="rollout-tablebox" aria-label="Branches in rollout">
+          <div class="rollout-toolbar"><button id="rollout-select-ready" class="text-button">Select all ready</button><label class="check-label"><input id="rollout-group" type="checkbox">Group by country</label></div>
+          <div class="table-scroll"><table class="rollout-table"><colgroup><col class="select-col"><col class="branch-col"><col class="config-col"><col class="readiness-col"><col></colgroup><thead><tr><th><input id="rollout-select-all" type="checkbox" aria-label="Select all ready branches"></th><th scope="col">Branch</th><th scope="col" class="rollout-config">Configuration</th><th scope="col">Readiness</th><th scope="col">Deployment</th></tr></thead><tbody id="rollout-rows"></tbody></table></div>
+          <div class="rollout-footer"><div><strong id="rollout-selected" aria-live="polite"></strong><p>Tenant checks run during deployment preview.</p></div><button id="rollout-review" class="button primary">Review selected branches →</button></div>
+        </section>
+        <p id="rollout-check-note" class="addressing-help" role="status"></p>
+        <button id="rollout-refresh" class="text-button">Refresh readiness and recorded results</button>
+      </section>
+      <section id="sites-view" hidden>
+        <button id="editor-overview" class="text-button editor-back">← Rollout overview</button>
+        <div class="page-heading"><div><p class="eyebrow">BRANCH ROLLOUT</p><h1>Branch configuration</h1><p class="subtitle">Review site details and VLANs before including this branch in your rollout.</p></div><div class="heading-actions"><button id="import" class="button">Import CSVs</button><button type="button" class="text-button csv-template-link" data-csv-templates>CSV templates</button><button id="pull-reference" class="button primary">Pull reference site</button></div></div>
+        <input id="file-input" type="file" multiple accept=".csv,text/csv" hidden>
+
+        <div class="workspace">
+          <section class="site-panel" aria-label="Sites in rollout"><div class="panel-title"><h2>Sites</h2><span id="site-count" class="count">0</span></div><div id="site-list"></div><div class="site-panel-footer"><button id="add-site" class="text-button">+ Add blank site</button><button id="example" class="text-button">Load an example rollout</button></div></section>
+          <section class="editor-panel">
+            <div id="empty" class="empty"><div class="empty-icon" aria-hidden="true">＋</div><h2>Your next rollout starts here.</h2><p>Choose an existing site from your tenant.<br>Reuse its settings and VLANs across your new branches.</p><button class="button primary" id="empty-reference">Choose a reference site</button><button class="text-button empty-secondary" id="empty-add">Or start with a blank site</button></div>
+            <div id="editor" hidden>
+              <div class="editor-heading"><div><p class="eyebrow">SITE CONFIGURATION</p><h2 id="editor-name">Untitled site</h2></div><label class="check-label"><input id="selected" type="checkbox" data-field="post"> Include in rollout</label></div>
+              <div class="editor-tabs" role="tablist" aria-label="Site configuration"><button id="tab-site" class="tab active" role="tab" aria-selected="true">Site details</button><button id="tab-vlans" class="tab" role="tab" aria-selected="false">VLANs <span id="vlan-count">0</span></button><button id="duplicate" class="text-button tab-action">Create branches</button></div>
+              <form id="site-form" autocomplete="off">
+                <div class="section-title"><h3>Branch identity</h3><p>Choose names your team recognizes and the template for this site's design.</p></div>
+                <div class="form-grid"><label>Site name <span class="required">*</span><input data-field="site_name" placeholder="Utrecht-NL-BR"></label><label>Country<input data-field="country" list="country-options" autocomplete="off" placeholder="Type or choose a country"></label><label>City<input data-field="city" placeholder="Utrecht"></label></div>
+                <div class="section-title"><h3>Site template</h3><p>Reuse a template, or give this site its own copy of the reference template.</p></div>
+                <div class="form-grid"><label>Template choice<select data-field="template_mode"><option value="existing">Use an existing template</option><option value="clone">Create a template for this site</option></select></label><label><span id="source-template-label">Existing template</span><input data-field="template_name" placeholder="Your site template"></label><label id="new-template-field" hidden>New template name<input data-field="new_template_name" maxlength="256" placeholder="Uses the new site name"></label></div>
+                <label id="template-name-option" class="check-label" hidden><input id="template-use-site-name" type="checkbox"> Use site name for template name</label>
+                <p id="template-choice-help" class="addressing-help" aria-live="polite"></p>
+                <div class="section-title"><h3>Gateways &amp; WAN connectivity</h3><p>Gateway names follow the site name until customized. Choose the activation WAN and its addressing for each gateway.</p></div>
+                <label class="gateway-setup">Gateway setup<select id="gateway-setup"><option value="standalone">Standalone — one gateway</option><option value="ha">High availability — two gateways</option></select></label>
+                <div class="interface-toolbar"><p id="interface-status" class="interface-status" role="status"></p><button id="refresh-interfaces" class="text-button" type="button">Refresh interfaces</button></div>
+                <div class="wan-gateways">
+                  <fieldset class="wan-gateway"><legend id="gateway-a-label">Gateway</legend><div class="form-grid"><label>Gateway name <span class="required">*</span><input data-field="gateway_name" placeholder="Utrecht-NL-BR-GW"></label><div class="interface-field"><span>Activation WAN interface <span class="required">*</span></span><div class="interface-picker"><select data-field="wan_interface_name"><option value="">Choose interface</option></select></div></div><label class="wan-mode-field">WAN addressing<select data-wan-mode="0" aria-label="Gateway A WAN addressing"><option value="dhcp">DHCP</option><option value="static">Static IP</option></select></label><div class="wan-static-fields" data-wan-static="0"><label>WAN IP address<input data-field="wan0_ip" placeholder="Required for Static IP"></label><label>WAN subnet mask<input data-field="wan0_mask" placeholder="Required for Static IP"></label><label>WAN default gateway<input data-field="wan0_gw" placeholder="Required for Static IP"></label></div></div></fieldset>
+                  <fieldset class="wan-gateway" id="gateway-b-panel" hidden><legend>Gateway B</legend><div class="form-grid"><label>Second gateway name<input data-field="gateway_name_b" placeholder="Utrecht-NL-BR-GW-B"></label><div class="interface-field"><span>Activation WAN interface</span><div class="interface-picker"><select data-field="wan1_interface_name"><option value="">Choose interface</option></select></div></div><label class="wan-mode-field">WAN addressing<select data-wan-mode="1" aria-label="Gateway B WAN addressing"><option value="dhcp">DHCP</option><option value="static">Static IP</option></select></label><div class="wan-static-fields" data-wan-static="1"><label>Second WAN IP address<input data-field="wan1_ip" placeholder="Required for Static IP"></label><label>Second WAN subnet mask<input data-field="wan1_mask" placeholder="Required for Static IP"></label><label>Second WAN default gateway<input data-field="wan1_gw" placeholder="Required for Static IP"></label></div><div class="interface-field"><span>HA link interface</span><div class="interface-picker"><select data-field="vrrp_link_interface"><option value="">Choose interface</option></select></div></div></div></fieldset>
+                </div>
+                <details id="additional-wans" class="additional-wans" hidden><summary id="additional-wans-summary">Additional WANs</summary><label class="check-label"><input type="checkbox" data-field="copy_additional_wans">Copy additional WANs from reference</label><p class="addressing-help">Copied from the reference and configured after site creation. Each WAN stays assigned to its appliance. Choose a WAN port other than its activation WAN and review static addresses for the new branch.</p><div id="additional-wan-rows"></div></details>
+                <p id="ha-deployment-note" class="deployment-warning" hidden>HA diagrams and CSV export are available. HA deployment from this workspace is awaiting WAN and management mapping verification.</p>
+                <details class="diagram-options"><summary>Diagram details <span class="small">— optional</span></summary>
+                  <p class="addressing-help">A diagram is saved automatically after deployment. These labels affect documentation only.</p>
+                  <div class="diagram-branding">
+                    <div><strong>Diagram logo</strong><p class="addressing-help">Zscaler by default. Upload a customer logo for the top-left corner of every site diagram in this project.</p></div>
+                    <div class="diagram-logo-controls"><img id="diagram-logo-image" alt="Customer logo preview" hidden><span id="diagram-logo-default">Zscaler logo (default)</span><button id="diagram-logo-upload" class="button" type="button">Upload customer logo</button><button id="diagram-logo-reset" class="text-button" type="button" hidden>Use Zscaler logo</button></div>
+                    <input id="diagram-logo-file" type="file" accept=".jpg,.jpeg,.png,image/jpeg,image/png" hidden>
+                    <p class="small">JPG or PNG · up to 2 MB. Applies to previews and future deployments. Saved deployment diagrams keep their original logo.</p>
+                    <p id="diagram-logo-feedback" class="addressing-help" role="status"></p>
+                  </div>
+                  <label>Downstream switch name<input id="diagram-switch" maxlength="120" placeholder="Downstream switch"></label>
+                  <div id="diagram-uplinks"></div>
+                  <p class="addressing-help">Use the same shared-circuit label only for WAN links on the same ISP circuit. Unlabeled links stay separate. The template's HA interface connects through the switch; enhanced HA's WAN Transit connects directly between the gateways.</p>
+                  <button id="diagram-preview" class="button" type="button">Preview site diagram</button>
+                  <p id="diagram-editor-feedback" class="addressing-help" role="status"></p>
+                </details>
+                <div class="section-title"><h3>DNS &amp; DHCP services</h3><p>Configure DNS servers and how the branch handles LAN DHCP.</p></div>
+                <div class="form-grid"><label>WAN DNS servers<input data-field="wan_dns" placeholder="1.1.1.1,8.8.8.8"></label><label>Private DNS servers<input data-field="private_dns" placeholder="172.16.150.253,172.16.150.252"></label><label>LAN DHCP mode<select data-field="dhcp_service_mode"><option value="">Automatic</option><option value="relay">Relay</option><option value="server">Server</option><option value="inherit">Inherit</option></select></label><label>DHCP server IP<input data-field="dhcp_server_ip" placeholder="172.16.150.252"></label></div>
+                <p class="addressing-help">During site creation, DHCP mode comes from the selected template. An explicit mode must match it. Relay mode requires a DHCP server IP address.</p>
+                <div class="zpa-option"><div><h3>Use private DNS only for selected domains</h3><p>Resolve local private names through this site’s private DNS. Send remaining queries to WAN DNS.<br>Optional · Off by default. Existing Zscaler and ZPA DNS rules retain priority.</p></div><label class="switch"><input type="checkbox" data-field="dns_split" aria-label="Use private DNS only for selected domains" aria-controls="dns-options"><span></span></label></div>
+                <section id="dns-options" hidden aria-label="Private-domain DNS options">
+                  <label class="full-field">Private domains<textarea data-field="dns_private_domains" rows="3" placeholder="corp.example.com" aria-describedby="dns-domains-help"></textarea></label>
+                  <p id="dns-domains-help" class="addressing-help">Enter one domain per line, or separate them with commas. Each entry includes the domain itself and its subdomains. Local resources need a record in private DNS; no individual DNS override is created.</p>
+                  <div class="dns-policy-preview">
+                    <table aria-describedby="dns-policy-preview-help">
+                      <caption>Expected DNS policy order</caption>
+                      <thead><tr><th scope="col">Order</th><th scope="col">Matching query</th><th scope="col">DNS destination</th></tr></thead>
+                      <tbody>
+                        <tr><td>1</td><td>Existing Zscaler service domains</td><td><strong>WAN DNS</strong><span id="dns-preview-wan-system"></span></td></tr>
+                        <tr><td>2</td><td>ZPA app-segment domains</td><td><strong>ZPA DNS</strong><span>Existing ZPA resolver</span></td></tr>
+                        <tr class="dns-private-rule"><td>3</td><td><strong>Selected private domains</strong><span id="dns-preview-domains"></span></td><td><strong>Private DNS</strong><span id="dns-preview-private"></span></td></tr>
+                        <tr><td>4</td><td>All other domains</td><td><strong>WAN DNS</strong><span id="dns-preview-wan-other"></span></td></tr>
+                      </tbody>
+                    </table>
+                    <p id="dns-policy-preview-help">ZPA matches take priority. Your selected private domains use private DNS; remaining queries use WAN DNS. Tenant preview verifies the final rule order.</p>
+                  </div>
+                  <p class="addressing-help">Reuses an exact matching domain object, or creates one. Keeps the automatic DNS rules and changes the final rule’s resolver. Applies during new-site deployment.</p>
+                </section>
+                <div class="section-title"><h3>ZIA location</h3><p>Choose what happens to the ZIA location when you deploy this site.</p></div>
+                <div class="form-grid"><label class="full-field">Location choice<select data-field="location_type" aria-describedby="location-choice-help"><option value="new">Create a new location</option><option value="existing">Use an existing location</option><option value="auto">Use existing if found, otherwise create</option><option value="none">No ZIA location</option></select></label></div>
+                <p id="location-choice-help" class="addressing-help location-choice-help" role="status"></p>
+                <div class="form-grid"><label data-location>Location name<input data-field="zia_location_name" placeholder="Defaults to site name for a new location"></label><label data-location-template>Template for new location<input data-field="location_template_name" placeholder="Default Location Template"><span class="field-help">Used only when a new location is created.</span></label></div>
+                <label id="location-name-option" class="check-label" hidden><input id="location-use-site-name" type="checkbox">Use site name for location name</label>
+                <div class="zpa-option"><div><h3>App Connector provisioning</h3><p>Create the site’s ZPA connector group and provisioning key.<br>Select LAN and management networks for a disabled application segment in the VLANs tab.</p></div><label class="switch"><input type="checkbox" data-field="appc_provision" aria-label="Provision App Connector"><span></span></label></div>
+                <div class="zpa-option"><div><h3>UCaaS local breakout</h3><p>Send selected collaboration services directly through this site’s WANs, bypassing ZIA.<br>Optional · Off by default. Adds two rules above template rules: UCaaS Web Breakout and UCaaS Media Breakout.</p></div><label class="switch"><input type="checkbox" data-field="ucaas_local_breakout" aria-label="UCaaS local breakout" aria-controls="ucaas-options"><span></span></label></div>
+                <section id="ucaas-options" hidden aria-label="UCaaS local breakout options">
+                  <div class="ucaas-services">
+                    <label class="check-label"><input type="checkbox" data-ucaas-service="teams">Microsoft Teams</label>
+                    <label class="check-label"><input type="checkbox" data-ucaas-service="zoom">Zoom Meetings</label>
+                    <label class="check-label"><input type="checkbox" data-ucaas-service="webex">Webex</label>
+                    <label class="check-label"><input type="checkbox" data-ucaas-service="meet">Google Meet</label>
+                  </div>
+                  <div class="form-grid"><label>Primary WAN<output id="ucaas-primary"></output><span class="field-help">Uses the WAN selected for this site above.</span></label><label>Secondary WAN<select data-field="ucaas_secondary_wan" aria-describedby="ucaas-wan-help"><option value="">Automatic · use the other WAN</option></select></label><label>Path selection<select data-field="ucaas_path_selection" aria-describedby="ucaas-path-help"><option value="best">Best</option><option value="none">None</option><option value="balanced">Balanced</option></select><span id="ucaas-path-help" class="field-help">Uses the WAN with the best link quality, based on loss, latency and jitter.</span></label></div>
+                  <p id="ucaas-wan-help" class="addressing-help" role="status"></p>
+                  <p class="addressing-help">Web ports are combined across the selected services’ destinations. Media ports are combined across their media destinations. All selected vendor ports are retained; provider objects remain reusable.</p>
+                  <p class="addressing-help">Matches selected destinations with their published TCP/UDP ports. Creates reusable IPv4, domain and Port objects before the forwarding rules; exact existing matches are reused. Preview creates nothing.</p>
+                  <details class="advanced"><summary>Selected destinations, ports &amp; sources</summary><p id="ucaas-catalog-status" class="addressing-help"></p><button id="refresh-ucaas" type="button" class="secondary">Refresh vendor lists</button><div id="ucaas-destinations"></div></details>
+                </section>
+                <details class="advanced"><summary>Advanced settings <span>Template ID overrides</span></summary><div class="form-grid"><label>Template ID override<input data-field="template_id"></label><label data-location-template>Location template ID override<input data-field="location_template_id"></label></div></details>
+              </form>
+              <section id="vlan-editor" hidden><div class="vlan-heading"><div><h3>Local networks</h3><p>DHCP ranges default to Automatic. Choose Custom to set your own endpoints; DHCP-off ranges are ignored.</p></div><div class="vlan-actions"><button id="refresh-vlan-interfaces" class="text-button" type="button">Refresh interfaces</button><button id="refresh-zones" class="text-button" type="button">Refresh zones</button><button id="change-addressing" class="text-button" type="button">Change addressing</button><button id="add-vlan" class="button">+ Add VLAN</button></div></div><p id="vlan-interface-status" class="interface-status" role="status"></p><p id="zone-lookup-status" class="zone-lookup-status" role="status"></p><div id="vlan-rows" class="vlan-list"></div><p id="no-vlans" class="muted-empty">No VLANs yet. Add one or keep this site without LAN changes.</p><div class="staging-note"><span class="note-symbol" aria-hidden="true">i</span><div><strong>One site. One staged application segment.</strong><p>Selected subnets are combined. The segment will be created in a disabled state, with TCP/UDP ports 1–52 and 54–65535, and ICMP off. App Connector provisioning must be enabled.</p></div></div></section>
+              <div class="editor-footer"><button id="remove-site" class="text-button danger">Remove site</button><span id="edit-status">Draft changes are saved on this computer.</span></div>
+            </div>
+          </section>
+        </div>
+        <div class="bottom-bar"><span id="batch-summary">No sites selected</span><button id="validate" class="button primary">Validate &amp; review <span aria-hidden="true">→</span></button></div>
+      </section>
+      <section id="review-view" hidden><div class="page-heading"><div><p class="eyebrow">ROLLOUT REVIEW</p><h1>Review your rollout.</h1><p class="subtitle">Review the selected branches, check the tenant, then deploy when ready.</p></div><button id="back" class="button">← Back to overview</button></div><div id="review-content"></div><section id="deployment-panel" class="deployment-panel" aria-labelledby="deployment-title"><div class="deployment-heading"><div><h2 id="deployment-title">Deploy your rollout</h2><p id="connection-summary" class="addressing-help">Connect to a tenant to preview deployment.</p></div><button id="deployment-connections" class="text-button">Connections</button></div><p id="deployment-message" class="addressing-help" role="status">Preview checks the tenant without creating resources.</p><div id="deployment-results"></div><div class="deployment-actions"><button id="preview-deployment" class="button primary" disabled>Preview deployment</button><button id="start-deployment" class="button primary" hidden disabled>Deploy selected sites</button><button id="deployment-report" class="button" hidden>Download report</button></div><p class="small deployment-footnote">Keep the local app running during deployment. Refreshing this page reconnects to the current run; restarting the app does not resume an interrupted run.</p></section><p id="diagram-feedback" class="addressing-help" role="status"></p><details id="saved-diagrams" class="saved-diagrams" hidden><summary>Saved deployment diagrams</summary><div class="diagram-history-toolbar"><label>Deployment run<select id="diagram-runs"></select></label><button id="diagram-download-all" class="button">Download all diagrams</button><button id="diagram-history-refresh" class="text-button">Refresh saved runs</button></div><div id="saved-diagram-sites"></div></details><div id="csv-handoff" class="handoff"><div><h3>Export for Python deployment</h3><p>Download your sites and VLANs together, with one network file per branch in the VLAN folder.</p><p class="small">Optional: use the same CSV workflow with Python. Downloading this bundle does not create resources.</p></div><button id="export" class="button" disabled>Download CSV bundle</button></div></section>
+    </main>
+    <footer class="app-footer"><span>Zero Trust Branch · Site Automation</span><span>Branch rollout workspace</span></footer>
+  </div>
+  <dialog id="reference-dialog" class="reference-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">START FROM A WORKING SITE</p><h2>Choose your reference</h2></div><button id="reference-close" class="icon-button" aria-label="Close reference picker">×</button></div>
+    <p class="reference-intro">Pull an existing site's configuration, then create copies for your new branches. The source site stays unchanged.</p>
+    <div id="reference-error" class="notice" role="alert" hidden></div>
+    <section id="connection-fields">
+      <h3 class="connection-heading">ZTB connection</h3>
+      <form id="connection-form" autocomplete="off"><div class="form-grid"><label>Tenant API URL<input id="tenant-url" type="url" placeholder="https://your-tenant-api.goairgap.com" required></label><label>API key<input id="tenant-key" type="password" autocomplete="off" required></label></div><div class="connection-actions"><button id="connect-tenant" class="button primary" type="submit">Connect to tenant</button><button id="connect-saved" class="text-button" type="button">Use existing local settings</button></div></form>
+      <p class="small">Newly entered credentials are used for this session only and are not included in CSV downloads.</p>
+    </section>
+    <section id="reference-picker" hidden><div class="connection-status"><span id="connected-tenant"></span><button id="change-connection" class="text-button">Change connection</button></div><label class="reference-search">Find a site<input id="reference-search" type="search" placeholder="Search by site, city, or template"></label><p id="reference-limit" class="small" hidden>Showing the first 100 inventory records. Other sites may be missing from this preview.</p><div id="reference-list" class="reference-list"></div><div class="dialog-footer"><button id="load-reference" class="button primary" disabled>Pull selected site</button></div></section>
+    <details id="zpa-connection" class="zpa-connection">
+      <summary>ZPA connection <span>Optional · App Connectors and application segments</span></summary>
+      <p class="small">ZPA uses separate credentials. You can skip this when pulling a reference site.</p>
+      <div id="zpa-connection-status" class="notice" role="status" hidden></div>
+      <div id="zpa-connection-error" class="notice" role="alert" hidden></div>
+      <form id="zpa-connection-form" autocomplete="off">
+        <fieldset id="zpa-connection-fields"><div class="form-grid">
+          <label class="full-field">Cloud API URL<input id="zpa-url" type="url" placeholder="https://config.your-zpa-cloud" required><span class="field-help">Use the API URL for your organization's ZPA cloud.</span></label>
+          <label>Client ID<input id="zpa-client-id" autocomplete="off" required></label>
+          <label>Client secret<input id="zpa-client-secret" type="password" autocomplete="off" required></label>
+          <label>Customer ID<input id="zpa-customer-id" autocomplete="off"><span class="field-help">Optional if supplied by the authentication token.</span></label>
+          <label>Enrollment certificate name<input id="zpa-certificate" value="Connector" required><span class="field-help">Must match an existing certificate in ZPA.</span></label>
+        </div><div class="connection-actions"><button id="connect-zpa" class="button" type="submit">Check ZPA connection</button><button id="connect-zpa-saved" class="text-button" type="button">Use existing local settings</button></div></fieldset>
+      </form>
+      <p class="small">Checks authentication and the enrollment certificate without creating resources. Credentials stay in memory for this app session and are excluded from CSV downloads. CLI deployment still uses your local credential file.</p>
+    </details>
+  </dialog>
+  <dialog id="projects-dialog" class="projects-dialog" aria-labelledby="projects-title">
+    <div class="dialog-heading"><div><p class="eyebrow">SAVED ON THIS COMPUTER</p><h2 id="projects-title">Open a rollout project</h2></div><button id="projects-close" type="button" class="icon-button" aria-label="Close project picker">×</button></div>
+    <p class="reference-intro">Projects keep your drafts and editor choices. Opening one does not start a deployment.</p>
+    <p id="projects-error" class="project-error" role="alert" hidden></p><div id="projects-list" class="reference-list"></div>
+  </dialog>
+  <dialog id="project-name-dialog" class="projects-dialog" aria-labelledby="project-name-title"><form id="project-name-form">
+    <div class="dialog-heading"><h2 id="project-name-title">New rollout project</h2><button id="project-name-close" type="button" class="icon-button" aria-label="Cancel project creation">×</button></div>
+    <label class="reference-search">Project name<input id="project-new-name" maxlength="120" required placeholder="Netherlands rollout"></label>
+    <p id="project-name-error" class="project-error" role="alert" hidden></p>
+    <div class="dialog-footer"><button id="project-create" class="button primary" type="submit">Create project</button></div>
+  </form></dialog>
+  <dialog id="branches-dialog" class="branches-dialog"><form id="branches-form">
+    <div class="dialog-heading"><div><p class="eyebrow">REUSE YOUR CONFIGURATION</p><h2>Create new branches</h2></div><button id="branches-close" type="button" class="icon-button" aria-label="Close branch builder">×</button></div>
+    <p id="branches-source" class="reference-intro"></p>
+    <p id="branches-location-help" class="branch-help"></p>
+    <div class="branch-controls"><label>Number of branches<input id="branch-count" type="number" min="1" max="100" value="1"></label><label>Template choice<select id="branches-template-mode"><option value="existing">Use the existing template</option><option value="clone">Create a template for each site</option></select></label></div>
+    <p id="branches-template-help" class="branch-help" aria-live="polite"></p>
+    <div class="table-scroll"><table class="branches-table"><thead><tr><th>Site name</th><th>Gateway name</th><th>City</th><th>Country</th></tr></thead><tbody id="branch-rows"></tbody></table></div>
+    <p class="branch-help">Copies start unselected. Review each branch's addressing and ZPA choices before including it in the rollout.</p>
+    <div class="dialog-footer"><button type="submit" class="button primary" id="create-branches">Create 1 branch</button></div>
+  </form></dialog>
+
+  <dialog id="addressing-dialog" class="addressing-dialog" aria-labelledby="addressing-title">
+    <div class="dialog-heading"><div><p class="eyebrow">EDIT THIS SITE</p><h2 id="addressing-title">Change addressing</h2></div><button id="addressing-close" class="icon-button" aria-label="Close addressing change">×</button></div>
+    <p id="addressing-site" class="reference-intro"></p>
+    <div class="form-grid"><label>Current prefix<input id="addressing-from" placeholder="10.20" autocomplete="off" inputmode="decimal"></label><label>New prefix<input id="addressing-to" placeholder="10.30" autocomplete="off" inputmode="decimal"></label></div>
+    <p class="addressing-help">Enter 1–3 octets, such as 10.20 → 10.30. Remaining octets and subnet sizes stay the same. Only checked VLANs change; WAN and site DNS settings stay as they are. Automatic VLAN DNS follows the gateway.</p>
+    <p id="addressing-status" class="addressing-help" role="status"></p>
+    <div id="addressing-preview" class="addressing-preview"></div>
+    <div class="dialog-footer"><button id="addressing-cancel" class="button">Cancel</button><button id="addressing-apply" class="button primary" disabled>Apply changes</button></div>
+  </dialog>
+  <dialog id="diagram-dialog" class="diagram-dialog" aria-labelledby="diagram-title">
+    <div class="dialog-heading"><h2 id="diagram-title">Site diagram</h2><button id="diagram-close" class="icon-button" aria-label="Close site diagram">×</button></div>
+    <p id="diagram-modal-note" class="addressing-help"></p>
+    <div class="diagram-actions"><button id="diagram-save-package" class="button">Download package (.zip)</button><button id="diagram-save-png" class="button">Download PNG</button><button id="diagram-save-svg" class="button">Download SVG</button><button id="diagram-save-visio" class="button">Download editable Visio</button><label class="check-label"><input id="diagram-zoom" type="checkbox">Actual size</label></div>
+    <div id="diagram-canvas" class="diagram-canvas"><img id="diagram-image" alt="Site topology and VLAN gateway legend"></div>
+  </dialog>
+ <dialog id="help-dialog" class="help-panel" aria-labelledby="help-title">
+  <div class="help-header"><h2 id="help-title">How to use</h2><button type="button" class="button" id="help-close" aria-label="Close help">Close</button></div>
+  <div class="help-body">
+   <p>Prepare branches from a reference configuration, review the plan, then follow each deployment result.</p>
+   <ol class="help-steps">
+    <li><h3>Choose a reference site</h3><p>Start with a working configuration. Check the template, gateway setup, networks, and optional services before using it for new branches.</p></li>
+    <li><h3>Prepare your branches</h3><p>Give each branch a unique site name and fill in its location, country, and network settings. Open a branch to resolve missing information, such as a WAN IP address.</p></li>
+    <li><h3>Select what to deploy</h3><p>Choose one branch for a pilot or select several for a rollout. Group selection includes ready branches with no recorded completion or existing-site result. HA branches can be exported as CSV; deployment from this workspace remains blocked. “Group by country” uses each branch’s Country field; a country checkbox selects its eligible branches. Grouping does not change deployment order.</p></li>
+    <li><h3>Review the destination and changes</h3><p>Choose “Review selected branches”, then “Preview deployment” and check the destination tenant, site names, and planned resources. Resolve any tenant-check errors before approving deployment. Selected branches run one at a time.</p></li>
+    <li><h3>Check the results</h3><p>Review the result and report for each branch. After successful configuration, verify appliance activation and connectivity. If a branch fails or only partly completes, inspect the tenant and failed stage before retrying.</p></li>
+   </ol>
+   <details><summary>What do the statuses mean?</summary><dl>
+    <dt>Ready</dt><dd>The branch details are ready for preview. This does not mean deployment has succeeded or that tenant checks have passed.</dd>
+    <dt>Needs changes</dt><dd>Open the branch and resolve the highlighted fields before selecting it.</dd>
+    <dt>Completed</dt><dd>A successful deployment is recorded for this project and connected tenant. This is not a live health check. “No recorded result” does not mean the site is absent; tenant preview checks for existing sites, including sites created elsewhere.</dd>
+    <dt>Failed or incomplete</dt><dd>Review the report. Some resources may already exist, even if the overall deployment did not finish.</dd>
+    <dt>Existing site / skipped</dt><dd>The requested site was not created because a matching site was found. Check whether it is the intended branch or a naming conflict.</dd>
+   </dl></details>
+   <details><summary>What if the site already exists?</summary><p>The tool checks tenant site inventory for a matching name, ignoring capitalization and surrounding spaces. A matching existing site blocks creation; this is not an update or overwrite workflow.</p><p>If the complete inventory cannot be verified, creation is blocked. Resolve the lookup error before retrying. Avoid deploying the same site from two sessions at once.</p></details>
+   <details><summary>What should I do after an error?</summary><p>Read the branch report and identify the failed stage. Check the destination tenant for any site or template already created. A partial result may need recovery rather than a fresh deployment; do not rename a branch just to bypass an existing-site check.</p><p>If a template was created but site creation failed, verify that template and the site inventory before reusing it. Keep the report for troubleshooting.</p></details>
+   <details><summary>Saving and returning later</summary><p>Wait for “Saved on this computer” before closing the tab. Projects retain branch details, selections, country grouping, and your last view. Connections and approvals are not saved; reconnect and preview again after restarting the app.</p><p>Recorded results from deployments made with this version are shown for the same project and connected tenant. Earlier runs and deployments from other tools may have no recorded result here. Existing-site checks still run before creation.</p><p>Keep the local app running during deployment. There is no automatic retry or rollback. Download the report and inspect the tenant before recovering an interrupted run.</p></details>
+  </div>
+ </dialog>
+  <dialog id="csv-import-dialog" class="csv-import-dialog" aria-labelledby="csv-import-title">
+    <div class="dialog-heading"><h2 id="csv-import-title">Import sites and VLANs</h2><button id="csv-import-close" type="button" class="icon-button" aria-label="Close CSV import">×</button></div>
+    <p>Start with the templates, or import CSV files you already prepared.</p>
+    <ol class="csv-import-steps">
+      <li><strong>Choose and extract a starter kit.</strong><p>Each kit includes <code>sites.csv</code>, matching VLAN files, and a column guide.</p>
+        <div class="csv-template-options">
+          <div class="csv-template-option"><strong>Standalone</strong><p>Two example branches, with one gateway per site.</p><button type="button" class="button" data-csv-download="standalone">Download standalone (.zip)</button></div>
+          <div class="csv-template-option"><strong>High availability (HA)</strong><p>One branch with Gateway A/B, both WANs, an HA link, a shared LAN, and separate management networks.</p><p class="csv-template-scope">Preparation and CSV export only. HA deployment from the UI is not enabled yet.</p><button type="button" class="button" data-csv-download="ha">Download HA (.zip)</button></div>
+        </div>
+      </li>
+      <li><strong>Fill in your branch details.</strong><p>Use one row per site and one row per VLAN. Each site’s <code>vlans_file</code> must match its VLAN filename. Replace the example template, ports, and addresses. Keep the headers and save as CSV.</p></li>
+      <li><strong>Choose your CSV files.</strong><p>Select <code>sites.csv</code> first; we’ll ask for the matching VLAN files. You can also select all CSVs together. Extract the ZIP before importing.</p></li>
+    </ol>
+    <p class="addressing-help">Examples start unselected. Import updates your local draft; review and deployment are separate steps. To keep a separate rollout, use New project or Save as copy before importing.</p>
+    <p id="csv-template-status" class="addressing-help" role="status"></p>
+    <div class="dialog-footer"><button id="csv-import-choose" type="button" class="button primary">Choose CSV files</button></div>
+  </dialog>
+  <datalist id="country-options">__COUNTRY_OPTIONS__</datalist>
+</body>
+</html>

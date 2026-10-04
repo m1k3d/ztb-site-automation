@@ -44,6 +44,7 @@ CSV_PATH = ROOT / "sites.csv"
 # Shared settings are loaded only when main() runs, never during import.
 from automation_config import Settings
 from api_client import ZTBClient
+from csv_safety import csv_text
 
 client = None
 BASE_V3 = BASE_V2 = ORIGIN = REFERER = ""
@@ -211,7 +212,7 @@ def match_row_by_name(rows: List[Dict[str, Any]], site_name: str) -> Optional[Di
 # ------------------------
 VLAN_CSV_FIELDS = [
     "name", "tag", "subnet", "default_gateway", "dhcp_start", "dhcp_end",
-    "interface", "zone", "enabled", "share_over_vpn", "dhcp_service", "zpa_include"
+    "interface", "zone", "enabled", "share_over_vpn", "dhcp_service", "zpa_include", "per_network_dns", "gateway_target"
 ]
 
 def _split_range(d: Dict[str, Any]) -> Tuple[str, str]:
@@ -237,8 +238,16 @@ def _map_dhcp_service_for_csv(raw: Optional[str]) -> str:
         return "non-airgapped"
     return raw
 
-def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def vlans_to_csv_rows(vlans: List[Dict[str, Any]], *, gateways=None) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
+    targets = {}
+    if gateways and len(gateways) > 1:
+        if len(gateways) != 2:
+            raise ValueError("Expected two HA gateways")
+        targets = {str(g.get('gateway_id') or g.get('id') or ''): target
+                   for g, target in zip(gateways, ('a', 'b'))}
+        if '' in targets or len(targets) != 2:
+            raise ValueError("Cannot identify HA gateway assignments")
     for v in vlans:
         name   = (v.get("display_name") or v.get("name") or "").strip()
         tag    = str(v.get("tag") or "").strip()
@@ -271,17 +280,34 @@ def vlans_to_csv_rows(vlans: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "enabled": enabled,
             "share_over_vpn": share_over_vpn,
             "dhcp_service": dhcp_service_disp,
+            "per_network_dns": str(v.get("per_network_dns") or "").strip(),
             # This is a local deployment choice, not inferred from ZTB or VPN sharing.
             "zpa_include": "0",
         })
+        if targets:
+            owners = str(v.get('gateway_id') or '').split(',')
+            management = zone.lower() == 'management zone' or 'lo0' in iface.lower().split(',')
+            if management or is_wan_vlan(v):
+                if len(owners) != 1 or owners[0] not in targets:
+                    raise ValueError("Cannot identify the HA gateway for a network")
+                out[-1]['gateway_target'] = targets[owners[0]]
+            else:
+                if len(owners) != 2 or set(owners) != set(targets):
+                    raise ValueError('Regular HA LAN networks must be assigned to both gateways')
+                ports = iface.split(',')
+                if len(ports) != 2:
+                    raise ValueError('Cannot identify both HA LAN interfaces')
+                mapped = dict(zip(owners, ports))
+                ordered = [mapped[owner] for owner in targets]
+                out[-1]['interface'] = ordered[0] if len(set(ordered)) == 1 else ','.join(ordered)
+                out[-1]['gateway_target'] = 'all'
     return out
 
-def write_vlans_csv(vlans: List[Dict[str, Any]], path: pathlib.Path):
-    rows = vlans_to_csv_rows(vlans)
+def write_vlans_csv(vlans: List[Dict[str, Any]], path: pathlib.Path, *, gateways=None):
+    rows = vlans_to_csv_rows(vlans, gateways=gateways)
+    content = csv_text(rows, VLAN_CSV_FIELDS)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=VLAN_CSV_FIELDS)
-        w.writeheader()
-        w.writerows(rows)
+        f.write(content)
 
 # ------------------------
 # sites.csv helpers (HA columns supported, no LAN column)
@@ -330,6 +356,7 @@ def upsert_sites_csv_row(row: Dict[str, str]):
                 fieldnames.append(key)
 
     # Replace only after the entire CSV has been written successfully.
+    content = csv_text(out, fieldnames)
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -337,9 +364,7 @@ def upsert_sites_csv_row(row: Dict[str, str]):
             prefix=CSV_PATH.name + ".", suffix=".tmp", delete=False,
         ) as f:
             temp_path = pathlib.Path(f.name)
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(out)
+            f.write(content)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_path, CSV_PATH)
@@ -436,6 +461,104 @@ def get_private_dns_members(site_id: str) -> str:
 # ------------------------
 # Main
 # ------------------------
+
+def site_to_csv_row(row, site_name, private_dns_ips, vlans_file="", *, wan_networks=None):
+    """Map a fetched site into editable CSV fields without I/O."""
+    ci = row.get("cluster_info") or {}
+    # --- Extract per-node WAN fields (supports standalone or HA) ---
+    gws = row.get("gateways") or ci.get("gateways") or []
+    gw_a = gws[0] if isinstance(gws, list) and len(gws) >= 1 else {}
+    gw_b = gws[1] if isinstance(gws, list) and len(gws) >= 2 else {}
+
+    gateway_name_a = row.get("gateway_name") or gw_a.get("gateway_name") or row.get("name") or ""
+    gateway_name_b = gw_b.get("gateway_name", "")
+
+    wan0_ip   = gw_a.get("wan_ip_address", "")
+    wan0_mask = gw_a.get("wan_subnet_mask", "")
+    wan0_gw   = gw_a.get("default_gw_ip", "")
+    wan0_if   = gw_a.get("wan_interface", "") or row.get("wan_interface_name", "")
+
+    wan1_ip   = gw_b.get("wan_ip_address", "")
+    wan1_mask = gw_b.get("wan_subnet_mask", "")
+    wan1_gw   = gw_b.get("default_gw_ip", "")
+    wan1_if   = gw_b.get("wan_interface", "")
+
+    def configured_wan(gateway, current, standalone):
+        if wan_networks is None:
+            return current
+        gateway_id = gateway.get("gateway_id") or gateway.get("id")
+        candidates = [v for v in wan_networks if is_wan_vlan(v) and not v.get("is_deleted") and
+                      ((gateway_id and str(v.get("gateway_id")) == str(gateway_id)) or
+                       (standalone and not v.get("gateway_id")))]
+        # Prefer an explicit port. With multiple uplinks, the gateway's primary
+        # address identifies its configured WAN network, independent of list order.
+        if len(candidates) > 1 and current[0]:
+            candidates = [v for v in candidates if v.get("interface") == current[0]]
+        if len(candidates) > 1:
+            def address(value):
+                try:
+                    result = ipaddress.IPv4Address(str(value or "").strip())
+                    return result if not result.is_unspecified else None
+                except ipaddress.AddressValueError:
+                    return None
+
+            primary_ip = address(gateway.get("gateway_ip_address"))
+            if primary_ip is not None:
+                primary = [v for v in candidates if address(v.get("default_gateway")) == primary_ip]
+                if len(primary) == 1:
+                    candidates = primary
+        if len(candidates) != 1:
+            return current
+        network = candidates[0]
+        port = network.get("interface")
+        if not isinstance(port, str) or not port.strip() or "," in port:
+            return current
+        if network.get("dhcp_client") is True:
+            return port, "", "", ""
+        if network.get("dhcp_client") is False:
+            static = tuple(str(network.get(key) or "") for key in ("default_gateway", "subnet", "wan_nexthop_ip"))
+            if not all(static):
+                raise ValueError("Static WAN settings are incomplete; refusing to infer DHCP")
+            return (port, *static)
+        return (port, *current[1:])
+
+    wan0_if, wan0_ip, wan0_mask, wan0_gw = configured_wan(gw_a, (wan0_if, wan0_ip, wan0_mask, wan0_gw), not gw_b)
+    wan1_if, wan1_ip, wan1_mask, wan1_gw = configured_wan(gw_b, (wan1_if, wan1_ip, wan1_mask, wan1_gw), False)
+
+    # Export the human-readable template name; the deployment engine resolves its ID.
+    # Omit template ID columns so re-export preserves overrides without adding columns.
+    return {
+        "site_name":           site_name,
+        "gateway_name":        gateway_name_a,
+        "gateway_name_b":      gateway_name_b,
+
+        "city":                (row.get("location") or {}).get("city","") if isinstance(row.get("location"), dict) else row.get("city",""),
+        "country":             (row.get("location") or {}).get("country","") if isinstance(row.get("location"), dict) else row.get("country",""),
+
+        "wan0_ip":             wan0_ip,
+        "wan0_mask":           wan0_mask,
+        "wan0_gw":             wan0_gw,
+        "wan1_ip":             wan1_ip,
+        "wan1_mask":           wan1_mask,
+        "wan1_gw":             wan1_gw,
+
+        "template_name":       row.get("template_name","") or ci.get("template_name",""),
+        "wan_dns":             ci.get("per_site_dns","") or row.get("per_site_dns",""),
+        "private_dns":         private_dns_ips,
+        "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
+        "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or site_name,
+        "location_type":       "auto",
+        "location_template_name": "Default Location Template",
+
+        "wan_interface_name":  wan0_if,
+        "wan1_interface_name": wan1_if,
+
+        "vlans_file":          vlans_file,
+        "post":                "0",
+        "appc_provision":      "0",
+    }
+
+
 def main(argv=None):
     global client, BASE_V3, BASE_V2, ORIGIN, REFERER
     ap = argparse.ArgumentParser(
@@ -529,59 +652,11 @@ def export_or_list(args):
 
     if not args.json_only:
         vlan_csv_path = OUT_VLANS_DIR / f"{args.site_name}.csv"
-        write_vlans_csv(vlans, vlan_csv_path)
+        write_vlans_csv(vlans, vlan_csv_path, gateways=row.get('gateways') or (row.get('cluster_info') or {}).get('gateways'))
         print(f"Saved VLANs CSV : {vlan_csv_path}")
 
-    # --- Extract per-node WAN fields (supports standalone or HA) ---
-    gws = row.get("gateways") or ci.get("gateways") or []
-    gw_a = gws[0] if isinstance(gws, list) and len(gws) >= 1 else {}
-    gw_b = gws[1] if isinstance(gws, list) and len(gws) >= 2 else {}
-
-    gateway_name_a = row.get("gateway_name") or gw_a.get("gateway_name") or row.get("name") or ""
-    gateway_name_b = gw_b.get("gateway_name", "")
-
-    wan0_ip   = gw_a.get("wan_ip_address", "")
-    wan0_mask = gw_a.get("wan_subnet_mask", "")
-    wan0_gw   = gw_a.get("default_gw_ip", "")
-    wan0_if   = gw_a.get("wan_interface", "") or row.get("wan_interface_name","ge5")
-
-    wan1_ip   = gw_b.get("wan_ip_address", "")
-    wan1_mask = gw_b.get("wan_subnet_mask", "")
-    wan1_gw   = gw_b.get("default_gw_ip", "")
-    wan1_if   = gw_b.get("wan_interface", "")
-
-    # Export the human-readable template name; the deployment engine resolves its ID.
-    # Omit template ID columns so re-export preserves overrides without adding columns.
-    csv_row = {
-        "site_name":           args.site_name,
-        "gateway_name":        gateway_name_a,
-        "gateway_name_b":      gateway_name_b,
-
-        "city":                (row.get("location") or {}).get("city","") if isinstance(row.get("location"), dict) else row.get("city",""),
-        "country":             (row.get("location") or {}).get("country","") if isinstance(row.get("location"), dict) else row.get("country",""),
-
-        "wan0_ip":             wan0_ip,
-        "wan0_mask":           wan0_mask,
-        "wan0_gw":             wan0_gw,
-        "wan1_ip":             wan1_ip,
-        "wan1_mask":           wan1_mask,
-        "wan1_gw":             wan1_gw,
-
-        "template_name":       row.get("template_name","") or ci.get("template_name",""),
-        "wan_dns":             ci.get("per_site_dns","") or row.get("per_site_dns",""),
-        "private_dns":         private_dns_ips,
-        "dhcp_server_ip":      ci.get("dhcp_server_ip","") or row.get("dhcp_server_ip",""),
-        "zia_location_name":   row.get("zia_location_name","") or row.get("location_display_name","") or args.site_name,
-        "location_type":       "auto",
-        "location_template_name": "Default Location Template",
-
-        "wan_interface_name":  wan0_if,
-        "wan1_interface_name": wan1_if,
-
-        "vlans_file":          (OUT_VLANS_DIR / f"{args.site_name}.{'json' if args.json_only else 'csv'}").relative_to(CSV_PATH.parent).as_posix(),
-        "post":                "0",
-        "appc_provision":      "0",
-    }
+    vlan_file = (OUT_VLANS_DIR / f"{args.site_name}.{'json' if args.json_only else 'csv'}").relative_to(CSV_PATH.parent).as_posix()
+    csv_row = site_to_csv_row(row, args.site_name, private_dns_ips, vlan_file, wan_networks=vlans_all)
 
     upsert_sites_csv_row(csv_row)
     print(f"Upserted row in {CSV_PATH}: {csv_row}")

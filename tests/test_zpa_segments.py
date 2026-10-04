@@ -95,12 +95,27 @@ class SegmentTests(unittest.TestCase):
         self.assertFalse(validate_rows([row]).valid)
         self.assertTrue(validate_rows([site(vlans=[{**vlan(), "zone": "PRINTERS-ZONE"}])]).valid)
 
-    def test_management_wan_ha_and_disabled_vlans_are_rejected(self):
-        for change in ({"interface": "lo0", "subnet": "32"}, {"zone": "Management Zone"},
-                       {"zone": "WAN Zone"}, {"interface": "ge3"}, {"enabled": "false"}):
+    def test_wan_ha_and_disabled_vlans_are_rejected(self):
+        for change in ({"zone": "WAN Zone"}, {"zone": "HA Internal"},
+                       {"interface": "ge3"}, {"enabled": "false"}):
             with self.subTest(change=change):
                 self.assertFalse(validate_rows([site(vlans=[{**vlan(), **change}])]).valid)
         self.assertFalse(validate_rows([site(vrrp_link_interface="ge5")]).valid)
+
+    def test_management_selection_uses_the_same_flag_and_segment(self):
+        for interface, subnet in (("lo0", "32"), ("ge1", "24")):
+            for zone in ("Management Zone", "Management", "MGMT Zone", "mgmt"):
+                with self.subTest(interface=interface, zone=zone):
+                    management = {**vlan(), "name": "MGMT", "tag": "1", "interface": interface,
+                                  "subnet": subnet, "default_gateway": "10.0.0.1", "zone": zone, "dhcp_service": "off"}
+                    validated = validate_rows([site(vlans=[management, vlan()])])
+                    self.assertTrue(validated.valid, validated.issues)
+                    plan = segments.build_segment_plan("Branch", validated.sites[0].vlans)
+                    self.assertEqual(plan.subnets, ("10.0.0.1/32" if subnet == "32" else "10.0.0.0/24", "10.20.0.0/24"))
+                    self.assertFalse(plan.report()["enabled"])
+                    management["zpa_include"] = "0"
+                    validated = validate_rows([site(vlans=[management, vlan()])])
+                    self.assertEqual(segments.build_segment_plan("Branch", validated.sites[0].vlans).subnets, ("10.20.0.0/24",))
 
     def test_combines_only_selected_subnets_and_normalizes_name(self):
         rows = [vlan(), {**vlan(), "tag": "30", "name": "Servers", "default_gateway": "10.30.0.1", "subnet": "255.255.255.0"},
@@ -152,6 +167,45 @@ class SegmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another selected site"):
             segments.check_batch_conflicts([self.plan, other], {r: [] for r in segments.COLLECTIONS})
 
+    def test_management_overlap_exposes_specific_conflicts_without_blocking_unique_hosts(self):
+        management = dict(name="MGMT", tag="1", subnet="32", default_gateway="172.16.65.1",
+                          interface="lo0", zone="Management Zone", dhcp_service="off", enabled=True, zpa_include=True)
+        validated = validate_rows([site("NewBranch", vlans=[management])])
+        plan = segments.build_segment_plan("NewBranch", validated.sites[0].vlans)
+        inventory = {r: [] for r in segments.COLLECTIONS}
+        inventory["application"] = [dict(id=str(i), name=name, domainNames=["172.16.65.1"], enabled=True)
+                                    for i, name in enumerate(("Utrecht-Branch-SNMP", "Utrecht-Branch-SSH"), 1)]
+        with self.assertRaises(segments.SegmentConflict) as caught:
+            segments.check_conflicts(plan, inventory)
+        message = str(caught.exception)
+        for value in ("172.16.65.1/32", "Utrecht-Branch-SNMP", "Utrecht-Branch-SSH", "management IP", "VLANs"):
+            self.assertIn(value, message)
+        management["default_gateway"] = "172.16.65.2"
+        validated = validate_rows([site("NewBranch", vlans=[management])])
+        plan = segments.build_segment_plan("NewBranch", validated.sites[0].vlans)
+        segments.check_conflicts(plan, inventory)
+        self.assertEqual(plan.subnets, ("172.16.65.2/32",))
+        self.assertFalse(plan.report()["enabled"])
+
+    def test_management_conflict_survives_engine_and_ui_redaction_but_http_errors_do_not(self):
+        from input_validation import ValidationIssue
+        from ui_deployment import public_issues
+        engine, validation = self.loopback_engine(include_management=True)
+        self.api.data["application"]["old"] = dict(id="old", name="Existing Management SSH", domainNames=["10.0.0.1"], enabled=True)
+        plan = engine.plan(validation)
+        self.assertEqual(len(plan.issues), 1)
+        self.assertIsInstance(plan.issues[0], segments.SegmentConflictIssue)
+        visible = public_issues(plan.issues)[0]["message"]
+        self.assertIn("10.0.0.1/32", visible)
+        self.assertIn("Existing Management SSH", visible)
+        self.assertIn("management IP", visible)
+        engine.execute(plan)
+        engine.create_site.assert_not_called()
+        self.assertTrue(all(c[0] == "GET" for c in self.api.calls))
+        generic = public_issues([ValidationIssue("configuration", 0, "ZPA preflight", "private-token raw response")])
+        self.assertNotIn("private-token", json.dumps(generic))
+        self.assertNotIn(CONTEXT.token, json.dumps(public_issues(plan.issues)))
+
     def test_inventory_paginates_and_fails_closed(self):
         pages = [dict(totalCount="2", totalPages="2", list=[{"id": str(i), "name": f"App{i}"}]) for i in (1, 2)]
         self.request.side_effect = [Mock(status_code=200, json=Mock(return_value=p)) for p in pages]
@@ -193,6 +247,17 @@ class SegmentTests(unittest.TestCase):
             segments.stage_segments(CONTEXT, self.plan, "connector", self.plan.report())
         self.assertEqual(len([c for c in self.api.calls if c[0] == "POST"]), before)
 
+    def test_management_host_readback_without_32_preserves_exact_scope(self):
+        management = {**vlan(), "name": "MGMT", "interface": "lo0", "subnet": "32",
+                      "default_gateway": "172.30.65.1", "dhcp_service": "off"}
+        validated = validate_rows([site(vlans=[management, vlan()])])
+        plan = segments.build_segment_plan("Branch", validated.sites[0].vlans)
+        self.api.alter = lambda kind, data: {**data, "domainNames": [v.removesuffix('/32') for v in data['domainNames']]} if kind == 'application' else data
+        self.assertTrue(segments.stage_segments(CONTEXT, plan, 'connector', plan.report(), emit=lambda _: None))
+        self.assertEqual(segments.destination_networks(['172.30.65.1']), {'172.30.65.1/32'})
+        self.assertNotEqual(segments.destination_networks(['172.30.65.0/24']), {'172.30.65.1/32'})
+        self.assertIsNone(segments.destination_networks(['*']))
+
     def test_failure_stops_dependent_writes_and_retains_created_ids(self):
         self.api.fail_resource = "serverGroup"
         with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
@@ -233,7 +298,7 @@ class SegmentTests(unittest.TestCase):
         engine = DeploymentEngine(Settings(ztb_api_base="https://example.invalid", bearer="test",
             zpa_base_url="https://example.invalid", zpa_client_id="test", zpa_client_secret="test"), emit=lambda _: None)
         self.addCleanup(engine.client.close)
-        for method, value in (("site_exists", False), ("create_site", (True, "created", None)),
+        for method, value in (("get_template_settings", {"deployment_type":"standalone", "dhcp_service":"server"}), ("list_site_inventory", []), ("site_exists", False), ("create_site", (True, "created", None)),
                               ("resolve_gateway_ids_and_cluster", ("gateway", 123)), ("resolve_site_id", "site"),
                               ("process_vlans_for_site", True)):
             self.stack.enter_context(patch.object(engine, method, return_value=value))
@@ -264,6 +329,78 @@ class SegmentTests(unittest.TestCase):
         self.assertFalse(result.sites[0].stages["ZPA segments"])
         self.assertEqual(result.sites[0].zpa_segments["status"], "blocked")
         self.assertTrue(all(c[0] == "GET" for c in self.api.calls))
+
+    def loopback_engine(self, include_management=False):
+        engine = self.engine()
+        networks = [dict(name="MGMT", tag="1", subnet="32", default_gateway="10.0.0.1",
+                         interface="lo0", dhcp_service="off", enabled=True, zpa_include=include_management), vlan()]
+        validation = validate_rows([site(vlans=networks)])
+        self.assertTrue(validation.valid, validation.issues)
+        engine.process_vlans_for_site = DeploymentEngine.process_vlans_for_site.__get__(engine)
+        engine.get_gateway_interfaces_v2 = Mock(return_value=[])
+        engine.post_vlan = Mock(return_value=(True, ""))
+        engine.list_site_vlans_v2 = Mock(return_value=[dict(v, id=str(i)) for i, v in enumerate(networks)])
+        engine.put_json = Mock(return_value=Mock(status_code=200))
+        return engine, validation
+
+    def test_selected_loopback_stages_its_exact_host_even_when_binding_is_pending(self):
+        engine, validation = self.loopback_engine(include_management=True)
+        result = engine.run(validation)
+        outcome = result.sites[0]
+        self.assertEqual(outcome.status, "partial")
+        self.assertTrue(outcome.stages["VLANs"])
+        self.assertFalse(outcome.stages["Loopback binding"])
+        self.assertTrue(outcome.stages["ZPA segments"])
+        application = next(iter(self.api.data["application"].values()))
+        self.assertEqual(application["domainNames"], ["10.0.0.1/32", "10.20.0.0/24"])
+        self.assertIs(application["enabled"], False)
+        self.assertEqual(application["icmpAccessType"], "NONE")
+        self.assertEqual(len(self.api.data["application"]), 1)
+
+    def test_pending_loopback_does_not_block_disabled_lan_segment(self):
+        engine, validation = self.loopback_engine()
+        result = engine.run(validation)
+        outcome = result.sites[0]
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(outcome.status, "partial")
+        self.assertTrue(outcome.stages["VLANs"])
+        self.assertFalse(outcome.stages["Loopback binding"])
+        self.assertTrue(outcome.stages["ZPA segments"])
+        self.assertEqual(outcome.zpa_segments["status"], "staged_disabled")
+        application = next(iter(self.api.data["application"].values()))
+        self.assertIs(application["enabled"], False)
+        self.assertEqual(application["domainNames"], ["10.20.0.0/24"])
+        server = next(iter(self.api.data["serverGroup"].values()))
+        self.assertEqual(server["appConnectorGroups"], [{"id": "new-connector"}])
+        with tempfile.TemporaryDirectory() as directory:
+            path = reserve_report(directory)
+            save_report(path, result)
+            report = path.with_suffix(".txt").read_text()
+            self.assertIn("failed stages: Loopback binding", report)
+            self.assertIn("staged_disabled", report)
+            self.assertNotIn(CONTEXT.token, report)
+
+    def test_pending_loopback_cannot_mask_actual_vlan_or_connector_failure(self):
+        for failure in ("post", "enable", "share", "inventory", "connector"):
+            with self.subTest(failure=failure):
+                engine, validation = self.loopback_engine()
+                if failure == "post":
+                    engine.post_vlan.side_effect = [(True, ""), (False, "rejected")]
+                elif failure == "enable":
+                    engine.put_json.side_effect = [Mock(status_code=200), Mock(status_code=403)]
+                elif failure == "share":
+                    validation.sites[0].vlans[1]["share_over_vpn"] = True
+                    engine.patch_json = Mock(return_value=Mock(status_code=403))
+                elif failure == "inventory":
+                    engine.list_site_vlans_v2.side_effect = RuntimeError("read failed")
+                else:
+                    self.stack.enter_context(patch("zpa_provisioning.provision_zpa_for_site", return_value=False))
+                result = engine.run(validation)
+                self.assertEqual(result.exit_code, 1)
+                self.assertFalse(result.sites[0].stages["ZPA segments"])
+                self.assertEqual(result.sites[0].diagnostics["ZPA segments"], "prerequisite_failed")
+                self.assertFalse(self.api.data["application"])
+                self.assertTrue(all(c[0] == "GET" for c in self.api.calls))
 
     def test_engine_report_records_disabled_state_and_ids_without_credentials(self):
         engine = self.engine()
