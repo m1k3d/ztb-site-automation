@@ -262,6 +262,7 @@ function render() {
   $("empty").hidden = Boolean(site); $("editor").hidden = !site;
   if (!site) return;
   $("editor-name").textContent = site.fields.site_name || "Untitled site";
+  $("remove-site").textContent = site.reference ? "Remove reference" : "Remove from rollout";
   $("selected").disabled = Boolean(site.reference) || Boolean(rollout?.blocked(site));
   $("vlan-count").textContent = site.vlans.length;
   document.querySelectorAll("[data-field]").forEach(input => {
@@ -929,8 +930,11 @@ $("editor-overview").onclick=()=>showView("overview");
 $("nav-review").onclick = review; $("validate").onclick = review;
 function removeRolloutSite(site) {
   if(!site || deploymentActive() || projectWorking || busy || !batch.includes(site))return;
-  const name=site.fields.site_name || 'Untitled branch';
-  if(!confirm(`Remove “${name}” from this rollout? This removes the local draft only. The site in Zscaler is unchanged.`))return;
+  const name=site.fields.site_name || site.reference?.name || (site.reference?'Untitled reference':'Untitled branch');
+  const message=site.reference
+    ? `Remove reference “${name}” from this project? This removes the local reference only. Branches already created from it and the site in Zscaler are unchanged.`
+    : `Remove “${name}” from this rollout? This removes the local draft only. The site in Zscaler is unchanged.`;
+  if(!confirm(message))return;
   const index=batch.indexOf(site);
   if(index<0 || deploymentActive() || projectWorking || busy)return;
   batch.splice(index,1);

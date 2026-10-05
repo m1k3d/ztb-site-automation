@@ -71,7 +71,14 @@ const ZtbRollout = {install(ctx) {
     }else indices.forEach(row);
     if(!indices.length){const tr=el('tr'),td=el('td','Create branches from a reference site, import CSVs, or add a blank branch.','overview-empty');td.colSpan=5;tr.append(td);rows.append(tr);}
     const refs=$('reference-cards');refs.replaceChildren();
-    batch.forEach((s,i)=>{if(!s.reference)return;const card=el('article',undefined,'reference-card');card.append(el('h2',s.fields.site_name || s.reference.name),el('p',`${s.fields.template_name || 'Template'} · ${s.vlans.length} VLANs`),button('Review reference and create branches →',()=>ctx.edit(i),'button'));refs.append(card);});
+    batch.forEach((s,i)=>{
+      if(!s.reference)return;
+      const card=el('article',undefined,'reference-card'),actions=el('div',undefined,'reference-card-actions');
+      const remove=button('Remove reference',()=>{if(!ctx.active())ctx.remove(s);},'text-button danger');
+      remove.disabled=ctx.active();remove.setAttribute('aria-label',`Remove reference ${s.fields.site_name || s.reference.name || 'Untitled reference'}`);
+      actions.append(button('Review reference and create branches →',()=>ctx.edit(i),'button'),remove);
+      card.append(el('h2',s.fields.site_name || s.reference.name),el('p',`${s.fields.template_name || 'Template'} · ${s.vlans.length} VLANs`),actions);refs.append(card);
+    });
     $('overview-create').textContent=batch.some(s=>s.reference)?'Create branches':'Choose reference site';
   }
   async function refresh(force=false){

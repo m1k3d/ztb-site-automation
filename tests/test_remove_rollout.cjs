@@ -37,6 +37,23 @@ test('canceling removal leaves the saved draft and preview unchanged',()=>{
   assert.equal(c.previewSnapshot,'approved');assert.equal(saves.length,0);
 });
 
+test('removing a reference saves its removal without changing branch copies',()=>{
+  const {context:c,prompts,saves}=workspace();
+  const branches=JSON.stringify(c.batch.slice(1)),editing=c.batch[2];
+  c.removeRolloutSite(c.batch[0]);
+  assert.match(prompts[0],/Remove reference “Reference”/);
+  assert.match(prompts[0],/local reference only/);
+  assert.match(prompts[0],/Branches already created from it and the site in Zscaler are unchanged/);
+  assert.equal(JSON.stringify(c.batch),branches);assert.equal(c.batch[c.current],editing);
+  assert.equal(JSON.stringify(saves[0]),branches);
+});
+
+test('canceling reference removal keeps it in the saved project',()=>{
+  const {context:c,saves}=workspace();c.confirmed=false;
+  const reference=c.batch[0];c.removeRolloutSite(reference);
+  assert.equal(c.batch[0],reference);assert.equal(c.batch.length,3);assert.equal(saves.length,0);
+});
+
 test('active deployment, preview, project change, and local validation block removal',()=>{
   for(const state of ['deploying','previewing','projectWorking','busy']){
     const {context:c,prompts,saves}=workspace();
