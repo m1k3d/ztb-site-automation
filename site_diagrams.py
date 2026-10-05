@@ -292,7 +292,7 @@ def capture(engine, prepared, outcome):
                             model['warnings'].append(f"{requested['name']}: {k} differs from the request; showing API values.")
                     for k in ('share_over_rt', 'airgap'):
                         if actual['access'][k] != requested['access'][k] and actual['access'][k] not in (None, 'unknown'):
-                            model['warnings'].append(f"{requested['name']}: {'routed-tunnel sharing' if k == 'share_over_rt' else 'Airgap mode'} differs from the request; showing API values.")
+                            model['warnings'].append(f"{requested['name']}: {'routed-tunnel sharing' if k == 'share_over_rt' else 'Segmentation mode'} differs from the request; showing API values.")
                     requested.update(actual)
                     if requested['kind'] == 'management' and (not requested['interface'] or outcome.stages.get('Loopback binding') is False):
                         requested['state'] = 'binding unverified'

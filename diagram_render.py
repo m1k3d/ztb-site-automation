@@ -7,6 +7,7 @@ import io
 import base64
 import colorsys
 import json
+import math
 import re
 import struct
 import textwrap
@@ -201,6 +202,31 @@ def port_networks(model, slot):
     return ports
 
 
+def trunk_entries(model, slot):
+    """Keep every enabled VLAN visible in a grid sized for this gateway's links."""
+    entries=[];label_width=230 if len(model['gateways'])==1 else 150
+    for port,nets in sorted(port_networks(model,slot).items()):
+        tags={}
+        for net in nets:
+            if not net.get('enabled',True):continue
+            raw=str(net.get('tag','')).strip()
+            tag=int(raw) if raw.isdigit() and 1<=int(raw)<=4094 else None
+            tags.setdefault(tag,net.get('color',MUTED))
+        chips=[dict(label=f'VL{tag}' if tag is not None else 'ID ?',color=tags[tag])
+               for tag in sorted(tags,key=lambda tag:tag if tag is not None else 4095)]
+        chip_width=max((math.ceil(len(chip['label'])*11*.59)+8 for chip in chips),default=0)
+        for chip in chips:chip['width']=chip_width
+        rows=[];row=[];used=0
+        for chip in chips:
+            if row and (len(row)==5 or used+4+chip['width']>label_width):
+                rows.append(row);row=[];used=0
+            used+=chip['width']+(4 if row else 0);row.append(chip)
+        if row:rows.append(row)
+        entries.append(dict(port=port,chips=chips,rows=rows,
+                            height=20+23*max(1,len(rows)),width=label_width))
+    return entries
+
+
 def wan_annotation(wan):
     ip,hop=wan['ip'],wan['next_hop']
     short=bool(ip and hop and ip.split('.')[:3]==hop.split('.')[:3])
@@ -221,7 +247,7 @@ def topology(model):
     if not any(service['name']=='ZPA' for service in services):
         services.append(dict(name='ZPA',state='context',label='Private applications'))
     mirrored_wans=not ha and bool(circuits) and all(len(wans)==1 for wans in circuits.values())
-    ports={g['slot']:port_networks(model,g['slot']) for g in gateways}
+    trunks={g['slot']:trunk_entries(model,g['slot']) for g in gateways}
     # Each circuit gets enough space for every gateway address; never abbreviate away data.
     circuit_y=[];cursor=158
     for wans in circuits.values():
@@ -232,6 +258,8 @@ def topology(model):
         circuit_y=[158+i*pitch for i in range(len(circuits))]
         cursor=158+len(circuits)*pitch
     height=max(450 if not ha else 590,cursor+75)
+    trunk_space=max((sum(entry['height']+5 for entry in entries) for entries in trunks.values()),default=0)+70
+    height=max(height,(354 if ha else 32)+2*trunk_space)
     if mirrored_wans and any(service['name']=='ZPA' for service in services):
         # Leave space below the lowest ISP's addresses before the ZPA path.
         # The service pair stays mirrored about the same gateway centreline.
@@ -328,14 +356,24 @@ def topology(model):
             top+=row_height
     # HA connects through the switch. Enhanced HA's WAN Transit is direct between peers.
     for gi,g in enumerate(gateways):
-        slot=g['slot'];y=gy[slot];nets_by_port=sorted(ports[slot].items())
-        for pi,(port,nets) in enumerate(nets_by_port):
+        slot=g['slot'];y=gy[slot];label_offset=0
+        for pi,trunk in enumerate(trunks[slot]):
+            port=trunk['port']
             bend=340+pi*20;offset=pi*13
             s.edge([(sx+89,cy+offset),(bend,cy+offset),(bend,y+offset),(gx-88,y+offset)],'switch','gw-'+slot,INK,False,2.4)
             lower_peer=ha and gi==1
-            lx=368;ly=y-26-pi*37 if lower_peer else y+10+pi*37
-            link_label(s,lx,ly,f'{port} · {len(nets)} VLANs',130,INK,14,True)
-            for ni,n in enumerate(nets[:10]):s.circle(lx+65-(min(len(nets),10)-1)*5+ni*10,ly-9 if lower_peer else ly+25,3,n['color'])
+            label_width=trunk['width'];lx=498-label_width
+            ly=y-trunk['height']-1-label_offset if lower_peer else y+10+label_offset
+            link_label(s,lx,ly,port,label_width,INK,14,True)
+            grid_width=max((sum(chip['width']+4 for chip in chips)-4 for chips in trunk['rows']),default=0)
+            for ri,chips in enumerate(trunk['rows']):
+                x=lx+(label_width-grid_width)/2
+                for chip in chips:
+                    s.rect(x,ly+20+ri*23,chip['width'],19,pale(chip['color']),chip['color'],radius=4)
+                    s.label(x+4,ly+22+ri*23,chip['label'],11,chip['color'],True,chip['width']-8,'center')
+                    x+=chip['width']+4
+            if not trunk['chips']:link_label(s,lx,ly+20,'No enabled VLANs',label_width,INK,11)
+            label_offset+=trunk['height']+5
         links=[l for l in model['ha_links'] if l['slot']==slot and l['role']=='ha'][:1]
         for link in links:
             direction=-1 if gi==0 else 1
@@ -422,14 +460,14 @@ def vlan_badges(net):
     segment=net.get('ip_app_segment') or {}
     app={'planned':'Planned','not_selected':'Not selected','created_disabled':'Created (disabled)',
          'not_created':'Not created','unverified':'Unverified'}.get(segment.get('state'),'Unknown')
-    return [('Routed tunnel: '+sharing,156),('Airgap: '+airgap,136),('IP app: '+app,192)]
+    return [('Routed tunnel: '+sharing,152),('Segmentation: '+airgap,164),('IP app: '+app,180)]
 
 
 def vlan_badge_row(s,x,y,net):
     for label,width in vlan_badges(net):
         s.rect(x,y,width,22,WHITE,LINE,radius=4)
-        s.label(x+6,y+3,label,11,INK,width=width-12)
-        x+=width+8
+        s.label(x+4,y+3,label,11,INK,width=width-8)
+        x+=width+6
 
 
 def schedule_blocks(model):
@@ -451,9 +489,9 @@ def schedule_blocks(model):
         if n['kind']=='management':value+='\n'+' · '.join(label for label,_ in vlan_badges(n))
         height=sum(line_count(v,12,486)*17 for v in value.split('\n'))+16
         blocks.append(dict(section='Management & HA networks',kind='multiline',value=value,height=height))
-    notes=list(dict.fromkeys(model['warnings']+model.get('ha_notes',[])))
+    notes=list(dict.fromkeys(note.replace('Airgap mode differs','Segmentation mode differs') for note in model['warnings']+model.get('ha_notes',[])))
     if lan:
-        notes.append('Airgap shows the VLAN default, not individual asset exceptions. DHCP off does not establish device isolation.')
+        notes.append('Segmentation shows the VLAN default, not individual asset exceptions. DHCP off does not establish device isolation.')
         notes.append('IP app describes this rollout’s IP-based ZPA segment. Created segments remain disabled; Not selected means no creation was requested.')
         if any('Unknown' in label for n in model['networks'] if n['kind'] in ('lan','management') for label,_ in vlan_badges(n)):
             notes.append('Unknown means the setting was not captured or could not be verified.')

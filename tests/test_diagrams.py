@@ -14,7 +14,7 @@ from xml.etree import ElementTree as ET
 from app import normalize_batch
 from deployment_engine import SiteResult, BatchResult
 from diagram_store import DiagramStore
-from diagram_render import svg, vsdx, png, scene, edge_paths, appliance_model, vlan_badges, circuit_colors, schedule_blocks, NS, BLUE, TEAL, PURPLE, TRANSIT
+from diagram_render import svg, vsdx, png, scene, edge_paths, appliance_model, vlan_badges, circuit_colors, schedule_blocks, trunk_entries, line_count, NS, BLUE, TEAL, PURPLE, TRANSIT
 from site_diagrams import planned, capture, options, decorate, ha_interfaces, network, apply_segment_result
 from run_report import reserve_report
 
@@ -33,6 +33,54 @@ def example(ha=False, enhanced=False, count=4):
 
 
 class DiagramTests(unittest.TestCase):
+    def test_all_twenty_trunk_labels_are_colored_and_aligned_in_every_vector_export(self):
+        model=planned(*example(count=20))
+        drawing=scene(model)
+        labels=[item for item in drawing.items if item['kind']=='text' and item['text'].startswith('VL') and item['text'][2:].isdigit()]
+        self.assertEqual([item['text'] for item in labels],[f'VL{tag}' for tag in range(10,201,10)])
+        self.assertEqual(len({item['w'] for item in labels}),1)
+        rows=sorted({item['y'] for item in labels})
+        self.assertEqual(len(rows),4)
+        columns=[item['x'] for item in labels if item['y']==rows[0]]
+        self.assertEqual(len(columns),5)
+        colors={'VL'+net['tag']:net['color'] for net in model['networks']}
+        for y in rows:self.assertEqual([item['x'] for item in labels if item['y']==y],columns)
+        for item in labels:self.assertEqual(item['fill'],colors[item['text']])
+        with zipfile.ZipFile(io.BytesIO(vsdx(model))) as archive:
+            visio=ET.fromstring(archive.read('visio/pages/page1.xml'))
+        for root,tag in [(ET.fromstring(svg(model)),'{http://www.w3.org/2000/svg}text'),(visio,'{'+NS+'}Text')]:
+            text=[''.join(item.itertext()) for item in root.iter(tag)]
+            for label in labels:self.assertIn(label['text'],text)
+            self.assertNotIn('+15',text)
+
+    def test_trunk_labels_follow_ha_ports_and_exclude_disabled_and_management_networks(self):
+        row,vlans,settings,ports=example(True,count=5)
+        for vlan in vlans[:-1]:vlan['interface']='ge2,ge3'
+        vlans[1]['enabled']=False
+        vlans[2]['gateway_target']='a'
+        vlans[3]['tag']='4094'
+        vlans[4]['tag']=''
+        model=planned(row,vlans,settings,ports)
+        a=trunk_entries(model,'a')[0];b=trunk_entries(model,'b')[0]
+        self.assertEqual((a['port'],b['port']),('ge2','ge3'))
+        self.assertEqual([chip['label'] for chip in a['chips']],['VL10','VL30','VL4094','ID ?'])
+        self.assertEqual([chip['label'] for chip in b['chips']],['VL10','VL4094','ID ?'])
+        for trunk in (a,b):
+            self.assertEqual(len({chip['width'] for chip in trunk['chips']}),1)
+            for row in trunk['rows']:
+                self.assertLessEqual(sum(chip['width'] for chip in row)+4*(len(row)-1),trunk['width'])
+
+    def test_long_segmentation_badges_fit_and_legacy_warning_uses_current_wording(self):
+        for mode in ('on','off','dhcp_off'):
+            badges=vlan_badges({'access':{'state':'confirmed','airgap':mode},'ip_app_segment':{'state':'created_disabled'}})
+            self.assertLessEqual(sum(width for _,width in badges)+12,510)
+            self.assertTrue(all(line_count(label,11,width-8)==1 for label,width in badges))
+        model=planned(*example());model['warnings']=['Corporate: Airgap mode differs from the request; showing API values.']
+        before=deepcopy(model)
+        self.assertIn(b'Segmentation mode',svg(model))
+        self.assertNotIn(b'Airgap',svg(model))
+        self.assertEqual(model,before)
+
     def test_zpa_service_is_visible_without_provisioning_or_segment_selection(self):
         row,vlans,settings,ports=example()
         row['appc_provision']='0'
@@ -66,11 +114,11 @@ class DiagramTests(unittest.TestCase):
                               ('non-airgapped','Off (Lite)'),('no_dhcp','DHCP off'),('off','DHCP off')]:
             net=network(dict(dhcp_service=mode,share_over_vpn='FALSE'),'confirmed')
             labels=[label for label,_ in vlan_badges(net)]
-            self.assertEqual(labels[:2],['Routed tunnel: No','Airgap: '+expected])
+            self.assertEqual(labels[:2],['Routed tunnel: No','Segmentation: '+expected])
         net=network(dict(share_over_vpn='yes',dhcp_service='inherit'),'confirmed')
         self.assertEqual(vlan_badges(net)[0][0],'Routed tunnel: Yes')
         for net in (network({},'confirmed'),{},dict(access={'state':'unverified','airgap':'on','share_over_rt':True})):
-            self.assertEqual([label for label,_ in vlan_badges(net)][:2],['Routed tunnel: Unknown','Airgap: Unknown'])
+            self.assertEqual([label for label,_ in vlan_badges(net)][:2],['Routed tunnel: Unknown','Segmentation: Unknown'])
         model=planned(*example())
         for net in model['networks']:net.pop('access');net.pop('ip_app_segment')
         self.assertIn(b'Routed tunnel: Unknown',svg(model))
@@ -115,9 +163,9 @@ class DiagramTests(unittest.TestCase):
         result=SiteResult(row['site_name'],'success',{'Site':True},site_id='site-1',gateway_ids=['gw-1'])
         saved=capture(engine,SimpleNamespace(row=row,vlans=vlans,template_settings=settings,template_id='t'),result)
         labels=[label for label,_ in vlan_badges(saved['networks'][0])]
-        self.assertEqual(labels,['Routed tunnel: Yes','Airgap: Off (Lite)','IP app: Unverified'])
+        self.assertEqual(labels,['Routed tunnel: Yes','Segmentation: Off (Lite)','IP app: Unverified'])
         self.assertEqual(engine.client.request.call_count,4)
-        self.assertTrue(any('Airgap mode differs' in warning for warning in saved['warnings']))
+        self.assertTrue(any('Segmentation mode differs' in warning for warning in saved['warnings']))
 
     def test_svg_safe_complete_and_native_vsdx_structure(self):
         row,vlans,settings,ports=example(True,True,40)
