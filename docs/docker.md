@@ -58,6 +58,8 @@ The Docker volume is separate from the native app's `out/projects/` and `out/run
 
 ## Optional local credentials
 
+For a file you manage yourself, use **Download example .env** in Connections, save it as `customer-a.env`, fill in your values, and choose **Load credentials from file**. This works in Docker without mounting files or editing Compose. The app holds the uploaded credentials in memory only; reload the file after a container restart. Protect the original file as plaintext credentials. See [connection file details](browser-workspace.md).
+
 Entering credentials in the UI keeps them in server memory for that session. If you prefer **Use existing local settings**, create a local `.env` from `.env.example`, then create `compose.credentials.local.yaml`:
 
 ```yaml

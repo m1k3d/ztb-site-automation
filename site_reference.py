@@ -10,6 +10,7 @@ import requests
 
 from api_client import ZTBClient
 from automation_config import Settings
+from connection_file import parse_connection_file
 from zpa_provisioning import prepare_zpa
 from additional_wans import from_reference
 import json
@@ -114,6 +115,10 @@ class ReferenceSites:
                 self.client.close()
             self.client = None
             self.rows = {}
+            # A new ZTB connection must not retain another customer's ZPA override.
+            self.zpa_config = None
+            self.zpa_context = None
+            self.zpa_override = False
             try:
                 if connection is None:
                     config = Settings.load(self.env_file)
@@ -153,6 +158,17 @@ class ReferenceSites:
                 if isinstance(exc, ReferenceError):
                     raise
                 raise ReferenceError("Unable to connect. Check the local credential file and network access.") from None
+
+    def connect_file(self, content):
+        """Validate before switching; only display-safe connection results leave memory."""
+        connection, zpa = parse_connection_file(content)
+        result = self.connect(connection)
+        if zpa:
+            try:
+                result['zpa'] = self.connect_zpa(zpa)
+            except ReferenceError as exc:
+                result['zpa_error'] = str(exc)
+        return result
 
     def deployment_settings(self):
         """Return a private credential snapshot; never serialize this to the browser."""

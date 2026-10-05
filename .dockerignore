@@ -13,6 +13,7 @@
 !country_catalog.py
 !csv_templates.py
 !credential_fields.py
+!connection_file.py
 !csv_safety.py
 !deployment_engine.py
 !dns_policy.py
@@ -50,6 +51,7 @@ ui/**
 !ui/projects.js
 !ui/diagrams.js
 !ui/theme.js
+!ui/customer-example.env
 !data/
 data/**
 !data/countries.json

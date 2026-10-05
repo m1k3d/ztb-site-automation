@@ -1079,7 +1079,8 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 function referenceError(message="") {$("reference-error").textContent=message; $("reference-error").hidden=!message;}
 function referenceWorking(working) {
   referenceBusy=working;
-  for (const id of ["connect-tenant","connect-saved","change-connection"]) $(id).disabled=working;
+  for (const id of ["connect-tenant","connect-saved","change-connection","connection-file-open"]) $(id).disabled=working || zpaBusy;
+  $("zpa-connection-fields").disabled=working || zpaBusy;
   $("reference-close").disabled=working || zpaBusy;
   $("connect-tenant").textContent=working ? "Connecting…" : "Connect to tenant";
   $("load-reference").disabled=working || !selectedReference;
@@ -1099,19 +1100,36 @@ function renderReferences() {
   }
   if(!sites.length)$("reference-list").append(node("p",tenantSites.length ? "No sites match your search." : "No sites were returned by this tenant.","muted-empty"));
 }
-async function connectReference(connection) {
-  if(referenceBusy)return;
+async function connectReference(connection, file) {
+  if(referenceBusy || zpaBusy || deploymentActive())return;
   referenceWorking(true);referenceError();
   clearZoneChoices();
   interfacesConnected=false;interfaceConnectionKey=null;interfaceCatalog.reset();renderInterfaceFeedback();
   try {
-    const result=await api("/api/tenant/connect",connection ? {connection} : {});
+    for(const id of ['zpa-url','zpa-client-id','zpa-client-secret','zpa-customer-id'])$(id).value='';
+    $('zpa-certificate').value='Connector';
+    $('zpa-connection-status').hidden=true;$('zpa-connection-error').hidden=true;
+    let result;
+    if(file){
+      if(!file.size || file.size>65536)throw new Error('Choose a populated connection file of 64 KB or smaller.');
+      let content;
+      try{content=new TextDecoder('utf-8',{fatal:true}).decode(await file.arrayBuffer());}
+      catch{throw new Error('Could not read this file. Save it as plain UTF-8 text and try again.');}
+      try{result=await api('/api/connections/import',{content});}finally{content=null;}
+    }else result=await api("/api/tenant/connect",connection ? {connection} : {});
+    if(result.zpa)showZpaConnection(result.zpa);
+    else if(file){$('zpa-connection-status').textContent='ZPA was not loaded. Configure it below if this rollout needs it.';$('zpa-connection-status').hidden=false;}
+    if(result.zpa_error){
+      $('zpa-connection-status').hidden=true;$('zpa-connection-error').textContent=result.zpa_error;$('zpa-connection-error').hidden=false;
+      referenceError('ZTB connected, but ZPA could not be verified. Check the ZPA connection below before deployment.');
+    }
+    if(result.zpa || result.zpa_error)$('zpa-connection').open=true;
     tenantSites=result.sites;selectedReference="";$("tenant-key").value="";
     $("connected-tenant").textContent=result.tenant;$("reference-limit").hidden=!result.limited;
     $("reference-search").value="";$("connection-fields").hidden=true;$("reference-picker").hidden=false;
-    renderReferences();previewSnapshot=null;refreshConnectionStatus();pollDeployment();
+    renderReferences();
   } catch(error) {tenantSites=[];selectedReference="";referenceError(error.message);}
-  finally {referenceWorking(false);renderZoneStatus();}
+  finally {$("tenant-key").value='';previewSnapshot=null;refreshConnectionStatus();pollDeployment();referenceWorking(false);renderReferences();renderZoneStatus();}
 }
 for(const id of ["pull-reference","empty-reference"])$(id).onclick=openReference;
 $("nav-reference").onclick=()=>showView("reference");
@@ -1120,22 +1138,32 @@ $("reference-dialog").addEventListener("cancel",event=>{if(referenceBusy || zpaB
 $("reference-search").oninput=renderReferences;
 $("connection-form").onsubmit=event=>{event.preventDefault();connectReference({tenant_url:$("tenant-url").value,api_key:$("tenant-key").value});};
 $("connect-saved").onclick=()=>connectReference();
+$("connection-file-open").onclick=()=>{if(!referenceBusy && !zpaBusy && !deploymentActive())$("connection-file").click();};
+$("connection-file").onchange=()=>{
+  const file=$("connection-file").files[0];$("connection-file").value='';
+  if(file)connectReference(undefined,file);
+};
 $("change-connection").onclick=()=>{$("connection-fields").hidden=false;$("reference-picker").hidden=true;referenceError();};
+function showZpaConnection(result) {
+  $("zpa-connection-status").textContent=`Authentication and certificate verified · ${result.cloud} · Customer ${result.customer_id} · Certificate ${result.certificate}. Resource-creation permissions have not been verified.`;
+  $("zpa-connection-status").hidden=false;
+}
 async function connectZpa(connection) {
-  if(zpaBusy)return;
+  if(zpaBusy || referenceBusy || deploymentActive())return;
   zpaBusy=true;$("zpa-connection-fields").disabled=true;$("reference-close").disabled=true;
+  referenceWorking(false);
   $("connect-zpa").textContent="Checking…";
   $("zpa-connection-status").hidden=true;$("zpa-connection-error").hidden=true;
   try {
     const result=await api('/api/zpa/connect',connection ? {connection} : {});
-    $("zpa-connection-status").textContent=`Authentication and certificate verified · ${result.cloud} · Customer ${result.customer_id} · Certificate ${result.certificate}. Resource-creation permissions have not been verified.`;
-    $("zpa-connection-status").hidden=false;
+    showZpaConnection(result);
     previewSnapshot=null;refreshConnectionStatus();pollDeployment();
   } catch(error) {
     $("zpa-connection-error").textContent=error.message;$("zpa-connection-error").hidden=false;
   } finally {
     $("zpa-client-secret").value="";
     zpaBusy=false;$("zpa-connection-fields").disabled=false;$("reference-close").disabled=referenceBusy;
+    referenceWorking(false);
     $("connect-zpa").textContent="Check ZPA connection";
   }
 }

@@ -112,6 +112,13 @@ def main():
             token = re.search(r'<meta name="local-token" content="([^"]+)"', html).group(1)
             for asset in ("/app.js", "/style.css", "/rollout.js", "/rollout.css", "/projects.js", "/interface-picker.js", "/diagrams.js"):
                 assert request(port, asset)[0] == 200, asset
+            status, example = request(port, '/customer-example.env')
+            assert status == 200 and 'YOUR_API_KEY' in example and 'ZPA_ENABLED=false' in example
+            # Unfilled examples must fail validation without contacting any tenant.
+            status, body = request(port, '/api/connections/import', {'content': example}, token=token)
+            assert status == 400 and 'populated API_KEY' in body and 'YOUR_API_KEY' not in body
+            assert request(port, '/api/connections/import', {'content': example}, token='wrong')[0] == 403
+            assert request(port, '/.env')[0] == 404
             status, body = request(port, '/api/csv-templates', {}, token=token)
             assert status == 200
             with zipfile.ZipFile(io.BytesIO(base64.b64decode(json.loads(body)['content']))) as kit:

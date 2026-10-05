@@ -20,6 +20,7 @@ venv/
 .env.*
 !.env.example
 *.env
+!ui/customer-example.env
 
 # Local output
 vlan/*.json

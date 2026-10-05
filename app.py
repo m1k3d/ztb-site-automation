@@ -266,6 +266,7 @@ class Handler(BaseHTTPRequestHandler):
                  "/rollout.css": ("rollout.css", "text/css; charset=utf-8"),
                  "/diagrams.js": ("diagrams.js", "text/javascript; charset=utf-8"),
                  "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                 "/customer-example.env": ("customer-example.env", "text/plain; charset=utf-8"),
                  "/style.css": ("style.css", "text/css; charset=utf-8")}
         if self.path not in files:
             return self.reply(404, {"error": "Not found"})
@@ -318,6 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                         item['fields']['diagram_options_json']=json.dumps(opts)
             elif self.path == "/api/tenant/connect":
                 result = self.server.deployment.connection_action(lambda: self.server.references.connect(payload.get("connection")))
+            elif self.path == "/api/connections/import":
+                result = self.server.deployment.connection_action(lambda: self.server.references.connect_file(payload.get("content")))
             elif self.path == "/api/tenant/pull":
                 result = self.server.references.pull(payload.get("site_id"))
             elif self.path == "/api/tenant/zones":

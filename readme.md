@@ -45,6 +45,8 @@ Name your **Rollout project** at the top of the page.
 
 Choose **Pull reference site**, enter your tenant connection details, and select a working site to copy. Review the imported settings before using **Create branches**. Pulling a reference reads its configuration; it does not change that site.
 
+To reuse credentials without retyping them, choose **Download example .env**, populate it, and save it as `customer-a.env`. Then use **Load credentials from file**. The file stays visible because its name does not start with a dot. Credentials are held in app memory only; reload the file after restarting the app. Keep your original file private—it contains plaintext keys. See [connection file instructions](docs/browser-workspace.md).
+
 You can also choose **Import CSVs** or **Add blank branch**. The example rollout is practice data: replace its names, template, interfaces, and addresses before deployment.
 
 ### 2. New branches
