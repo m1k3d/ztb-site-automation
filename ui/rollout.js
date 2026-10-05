@@ -8,7 +8,7 @@ function selectBranches(batch, indices, on, canSelect, replace=false) {
 const ZtbRollout = {install(ctx) {
   const $=id=>document.getElementById(id);
   const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
-  let checks=[],results=[],tenant=null,key='',pending='',timer=null,sequence=0,error='';
+  let checks=[],results=[],tenant=null,key='',pending='',timer=null,sequence=0,error='',actionSite=null;
   const normalize=s=>String(s || '').trim().toLowerCase();
   const fingerprint=()=>JSON.stringify([ctx.projectId(),ctx.batch()]);
   const country=value=>{
@@ -39,7 +39,20 @@ const ZtbRollout = {install(ctx) {
     function row(i){
       const site=batch[i],f=site.fields,check=valid?checks[i]:null,result=resultFor(site),tr=el('tr');tr.dataset.selected=String(selected.includes(i));
       const cell=el('td'),box=el('input');box.type='checkbox';box.checked=selected.includes(i);box.disabled=ctx.active() || (!box.checked && (!valid || !eligible(i)));box.setAttribute('aria-label',`Select ${f.site_name || 'Untitled branch'}`);box.onchange=()=>select([i],box.checked);cell.append(box);
-      const name=el('td');name.append(button(f.site_name || 'Untitled branch',()=>ctx.edit(i),'branch-link'),el('small',`${country(f.country)} · ${site.vlans.length} VLANs`));
+      const name=el('td'),heading=el('div',undefined,'branch-heading'),actions=el('div',undefined,'branch-actions');
+      actions.id=`rollout-actions-${i}`;actions.hidden=actionSite!==site || ctx.active();
+      const toggle=button('⋯',()=>{
+        if(ctx.active())return;
+        actionSite=actionSite===site?null:site;render();$(`rollout-action-toggle-${i}`)?.focus();
+      },'branch-actions-toggle');
+      toggle.id=`rollout-action-toggle-${i}`;toggle.disabled=ctx.active();
+      toggle.setAttribute('aria-label',`Actions for ${f.site_name || 'Untitled branch'}`);
+      toggle.setAttribute('aria-expanded',String(!actions.hidden));toggle.setAttribute('aria-controls',actions.id);
+      const remove=button('Remove from rollout',()=>{if(!ctx.active())ctx.remove(site);},'text-button danger');
+      remove.disabled=ctx.active();actions.append(remove);
+      name.onkeydown=event=>{if(event.key==='Escape' && actionSite===site){event.preventDefault();actionSite=null;render();$(`rollout-action-toggle-${i}`)?.focus();}};
+      heading.append(button(f.site_name || 'Untitled branch',()=>ctx.edit(i),'branch-link'),toggle);
+      name.append(heading,el('small',`${country(f.country)} · ${site.vlans.length} VLANs`),actions);
       const config=el('td',undefined,'rollout-config');config.append(el('span',f.template_mode==='clone'?`New: ${f.new_template_name || f.site_name}`:f.template_name || f.template_id || 'Template not set'),el('small',`${check?.ha?'HA · ':''}WAN · ${site.wan_modes?.['0']==='static' || f.wan0_ip?'Static IP':'DHCP'}`));
       const readiness=el('td');
       if(check?.issues.length){const b=button(`${check.issues.length} ${check.issues.length===1?'issue':'issues'} to resolve`,()=>ctx.edit(i),'readiness-warning');b.title=check.issues.map(x=>`${x.field}: ${x.message}`).join('\n');readiness.append(b);}
@@ -82,7 +95,7 @@ const ZtbRollout = {install(ctx) {
   $('overview-create').onclick=()=>{const i=ctx.batch().findIndex(s=>s.reference);if(i<0)ctx.reference();else{ctx.edit(i);$('duplicate').click();}};
   for(const [target,source] of [['reference-pull','pull-reference'],['reference-import','import'],['overview-import','import'],['reference-blank','add-site'],['overview-add','add-site'],['reference-example','example']])$(target).onclick=()=>$(source).click();
   $('help-open').onclick=()=>$('help-dialog').showModal();$('help-close').onclick=()=>$('help-dialog').close();
-  return {render,refresh,schedule,reset(){sequence++;key='';pending='';checks=[];results=[];tenant=null;error='';},blocked};
+  return {render,refresh,schedule,reset(){sequence++;key='';pending='';checks=[];results=[];tenant=null;error='';actionSite=null;},blocked};
 }};
 
 if(typeof module!=="undefined")module.exports={selectBranches};

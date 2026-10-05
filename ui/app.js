@@ -927,7 +927,17 @@ $("tab-site").onclick = () => {setTab("site");projectSaver?.touch();}; $("tab-vl
 $("nav-sites").onclick = () => showView("overview"); $("back").onclick = () => showView("overview");
 $("editor-overview").onclick=()=>showView("overview");
 $("nav-review").onclick = review; $("validate").onclick = review;
-$("remove-site").onclick = () => {if (!confirm("Remove this site from the local rollout? This does not change your tenant.")) return; batch.splice(current,1); current = Math.min(current,batch.length-1); markDirty(); render();};
+function removeRolloutSite(site) {
+  if(!site || deploymentActive() || projectWorking || busy || !batch.includes(site))return;
+  const name=site.fields.site_name || 'Untitled branch';
+  if(!confirm(`Remove “${name}” from this rollout? This removes the local draft only. The site in Zscaler is unchanged.`))return;
+  const index=batch.indexOf(site);
+  if(index<0 || deploymentActive() || projectWorking || busy)return;
+  batch.splice(index,1);
+  if(index<current)current--;else if(index===current)current=Math.min(current,batch.length-1);
+  rollout?.reset();markDirty();render();rollout?.refresh();
+}
+$("remove-site").onclick = () => removeRolloutSite(currentSite());
 $("duplicate").onclick = () => {
   branchSource=copySite(currentSite());branchDrafts=[];$("branch-count").value="1";
   $('branches-template-mode').value=branchSource.fields.template_mode || 'existing';
@@ -1285,7 +1295,7 @@ projectSaver=new ZtbProjects.Saver({request:api,snapshot:projectSnapshot,onState
 rollout=ZtbRollout.install({batch:()=>batch,projectId:()=>projectSaver?.project?.id,api,
   active:()=>deploymentActive() || projectWorking,changed:()=>{markDirty();renderList();},
   grouped:()=>groupByCountry,setGrouped:value=>{groupByCountry=value;projectSaver?.touch();},
-  edit:index=>{current=index;render();showView('sites');},reference:()=>showView('reference'),review});
+  edit:index=>{current=index;render();showView('sites');},remove:removeRolloutSite,reference:()=>showView('reference'),review});
 render();renderDeployment();
 initializeProjects().then(async()=>{
   await refreshConnectionStatus();await pollDeployment();
