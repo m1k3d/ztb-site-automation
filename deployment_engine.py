@@ -367,6 +367,9 @@ class DeploymentEngine:
             try:
                 ok, message, cluster_hint = self.create_site(template_id, site.payload)
             except Exception as exc:
+                entry.stages["Site"] = False
+                entry.diagnostics["Site"] = ("site_timeout" if isinstance(exc, requests.Timeout) else
+                    "site_connection_failed" if isinstance(exc, requests.ConnectionError) else "site_creation_unconfirmed")
                 stage_progress("Site", "failed")
                 message = f"site create failed: {exc}. Creation outcome may be unknown; check the site before rerunning."
                 entry.errors.append(message)
@@ -375,6 +378,7 @@ class DeploymentEngine:
             entry.stages["Site"] = bool(ok)
             stage_progress("Site", "success" if ok else "failed")
             if not ok:
+                entry.diagnostics["Site"] = message if isinstance(message, str) and re.fullmatch(r"site_http_[1-5][0-9]{2}", message) else "site_creation_unconfirmed"
                 entry.errors.append(f"site create failed: {message}")
                 self.log(f"ERR : {name}: {entry.errors[-1]}")
                 continue
@@ -1023,7 +1027,7 @@ class DeploymentEngine:
             cid = None
         if r.status_code in (200, 201, 202):
             return True, r.text, cid
-        return False, f"{r.status_code} {r.text[:300]}", cid
+        return False, f"site_http_{r.status_code}", cid
 
 
     def _network_base_from_start(self, start_ip: str, subnet_bits: str) -> Optional[str]:

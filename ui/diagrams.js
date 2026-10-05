@@ -60,17 +60,34 @@
       const box=el('div',undefined,'diagram-actions');
       const view=el('button','View diagram','button');view.type='button';view.onclick=()=>show(ref,name);view.disabled=!ref.formats?.includes('svg');
       const menu=el('details',undefined,'diagram-download');menu.append(el('summary','Download site diagram'));
+      menu.dataset.disclosureKey=JSON.stringify([name,'diagram-download']);
+      const downloads=[];
       for(const [format,label] of [['zip','All formats (.zip)'],['png','PNG preview'],['svg','SVG image'],['vsdx','Editable Visio (.vsdx)']]){
         const button=el('button',label,'text-button');button.type='button';button.disabled=format==='zip' ? !ref.formats?.length : !ref.formats?.includes(format);
         button.onclick=async()=>{try{download(await fetchFile(ref,format));menu.open=false;}catch(e){message(e.message);}};menu.append(button);
+        downloads.push({button,format});
       }
       box.append(view,menu);
       {
+        const feedback=el('span','', 'small');feedback.setAttribute('role','status');box.append(feedback);
+        const warning=el('p',ref.warning || '', 'deployment-warning');warning.hidden=!ref.warning;box.append(warning);
         const retry=el('button',ref.warning ? 'Regenerate diagram' : 'Update diagram layout','text-button');retry.type='button';retry.onclick=async()=>{
-          retry.disabled=true;
-          try{await api('/api/diagrams/regenerate',{project_id:projectId(),run:ref.run,site:ref.site});menu.open=false;await refresh();message('Diagram exports updated from the saved configuration snapshot.');}
-          catch(e){message(e.message);}finally{retry.disabled=false;}
-        };menu.append(retry);if(ref.warning)box.append(el('p',ref.warning,'deployment-warning'));
+          const pid=projectId();retry.disabled=true;retry.textContent='Updating layout…';feedback.textContent='Updating diagram exports…';
+          try{
+            const result=await api('/api/diagrams/regenerate',{project_id:pid,run:ref.run,site:ref.site});
+            if(pid!==projectId())return;
+            const updated=result.sites.find(site=>site.id===ref.site);
+            if(!updated)throw new Error('The updated diagram was not found. Refresh saved runs and try again.');
+            ref={...ref,formats:updated.formats,warning:updated.warning};
+            view.disabled=!ref.formats?.includes('svg');
+            for(const {button,format} of downloads)button.disabled=format==='zip' ? !ref.formats?.length : !ref.formats?.includes(format);
+            warning.textContent=ref.warning || '';warning.hidden=!ref.warning;
+            feedback.textContent='Diagram layout updated.';menu.open=false;
+            await refresh();await show(ref,name);
+          }
+          catch(e){feedback.textContent=e.message;message(e.message);}
+          finally{retry.disabled=false;retry.textContent=ref.warning ? 'Regenerate diagram' : 'Update diagram layout';}
+        };menu.append(retry);
       }
       return box;
     }

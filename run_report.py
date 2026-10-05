@@ -1,5 +1,6 @@
 """Operator summaries without payloads, credentials, or raw API responses."""
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -8,6 +9,9 @@ from dns_policy import MESSAGES as DNS_MESSAGES
 
 
 DIAGNOSTIC_MESSAGES = {
+    ("Site", "site_timeout"): "The site creation request timed out. Its outcome is unknown. Check the ZTB site list before recovery; the request was not automatically repeated after the timeout.",
+    ("Site", "site_connection_failed"): "The connection failed during site creation. Its outcome is unknown. Check connectivity and the ZTB site list before recovery.",
+    ("Site", "site_creation_unconfirmed"): "Site creation could not be confirmed. Inspect the ZTB site list before recovery; do not repeat template cloning.",
     ("Existing site check", "inventory_unreadable"): "The site inventory could not be read completely. No changes were made to this site. Check inventory access and retry after inventory changes settle. Repeated or inconsistent pages are blocked; the supported inventory limit is 10,000 sites.",
     **{("UCaaS local breakout", code): message for code, message in UCAAS_MESSAGES.items()},
     **{("DNS policy", code): message for code, message in DNS_MESSAGES.items()},
@@ -26,8 +30,22 @@ DIAGNOSTIC_MESSAGES = {
 
 def public_diagnostics(site):
     # Only known codes become messages; never serialize API bodies or exception text.
-    return {stage: DIAGNOSTIC_MESSAGES[(stage, code)] for stage, code in site.diagnostics.items()
-            if isinstance(code, str) and (stage, code) in DIAGNOSTIC_MESSAGES}
+    messages = {stage: DIAGNOSTIC_MESSAGES[(stage, code)] for stage, code in site.diagnostics.items()
+                if isinstance(code, str) and (stage, code) in DIAGNOSTIC_MESSAGES}
+    code = site.diagnostics.get('Site')
+    if isinstance(code, str) and re.fullmatch(r'site_http_[1-5][0-9]{2}', code):
+        status = int(code.rsplit('_', 1)[1])
+        hint = {
+            400: 'Check the site settings and the selected template’s deployment requirements.',
+            401: 'Reconnect to ZTB and check authentication.',
+            403: 'Check that the ZTB account has permission to deploy sites, not only create templates.',
+            404: 'Check that the verified template is still available in this tenant.',
+            409: 'Check for conflicting site, gateway, or location names.',
+            422: 'Check the site settings and the selected template’s deployment requirements.',
+            429: 'The API rate limit was reached; allow it to clear before recovery.',
+        }.get(status, 'Check the ZTB service and site configuration.')
+        messages['Site'] = f'Site creation returned HTTP {status}. {hint} Inspect the site list before recovery; do not repeat template cloning.'
+    return messages
 
 
 def reserve_report(directory='out/runs'):

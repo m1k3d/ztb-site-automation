@@ -216,7 +216,10 @@ def topology(model):
     circuits={}
     for wan in model['wans']:circuits.setdefault(wan['circuit'],[]).append(wan)
     colors=circuit_colors(model)
-    gateways=model['gateways'];services=model['services'];ha=len(gateways)>1
+    gateways=model['gateways'];services=list(model['services']);ha=len(gateways)>1
+    # Also show the ZPA service on older saved snapshots when their layout is updated.
+    if not any(service['name']=='ZPA' for service in services):
+        services.append(dict(name='ZPA',state='context',label='Private applications'))
     mirrored_wans=not ha and bool(circuits) and all(len(wans)==1 for wans in circuits.values())
     ports={g['slot']:port_networks(model,g['slot']) for g in gateways}
     # Each circuit gets enough space for every gateway address; never abbreviate away data.

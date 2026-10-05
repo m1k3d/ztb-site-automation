@@ -182,6 +182,9 @@ class TemplateCloningTests(unittest.TestCase):
         self.engine.create_site.side_effect=requests.Timeout('private raw error')
         result=self.engine.execute(self.plan())
         self.assertEqual(result.sites[0].status,'template_only')
+        self.assertFalse(result.sites[0].stages['Site'])
+        self.assertIn('timed out',public_sites(result)[0]['diagnostics']['Site'])
+        self.engine.create_site.assert_called_once()
         self.assertEqual(public_sites(result)[0]['template']['id'],'new-Branch')
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'run.json';save_report(path,result)
@@ -189,6 +192,28 @@ class TemplateCloningTests(unittest.TestCase):
         self.assertEqual(saved['sites'][0]['template']['id'],'new-Branch')
         self.assertIn('do not clone again',summary)
         self.assertNotIn('private raw error',summary)
+
+    def test_site_http_failures_report_status_without_response_body_or_retry(self):
+        for status in (400, 401, 403, 404, 409, 422, 429, 500, 503):
+            with self.subTest(status=status):
+                self.templates.pop('new-Branch',None)
+                plan=self.plan()
+                def create(identifier,payload):
+                    with patch.object(self.engine,'post_json',return_value=Mock(status_code=status,text='private response body')) as post:
+                        result=DeploymentEngine.create_site(self.engine,identifier,payload)
+                        post.assert_called_once()
+                        return result
+                self.engine.create_site.side_effect=create
+                result=self.engine.execute(plan)
+                site=public_sites(result)[0]
+                self.assertEqual(site['status'],'template_only')
+                self.assertFalse(site['stages']['Site'])
+                self.assertIn(f'HTTP {status}',site['diagnostics']['Site'])
+                with tempfile.TemporaryDirectory() as directory:
+                    report=Path(directory)/'run.json';save_report(report,result)
+                    exported=report.read_text()+report.with_suffix('.txt').read_text()+json.dumps(site)
+                self.assertIn(f'HTTP {status}',exported)
+                self.assertNotIn('private response body',exported)
 
     def test_review_and_export_preserve_clone_choice_and_names(self):
         import base64,io,zipfile

@@ -2,7 +2,11 @@
 
 Diagrams use one wide landscape sheet (at least 1.8:1), with connectivity reading left to right: access switch → ZTB gateways → WAN providers → Zero Trust Exchange. The VLAN gateway table, WAN addressing, management/HA networks, and configuration notes sit underneath the topology. The preview fits the whole sheet; **Actual size** lets you inspect small details. Dense configurations use a larger landscape canvas and additional table columns, preserving every row. Visio exports explicitly select landscape A3 printing and fit to one page wide by one page tall. Use larger paper for dense sheets when printing at a readable scale.
 
-For a saved diagram made with an older layout, choose **Download site diagram → Update diagram layout**. This redraws PNG/SVG/VSDX from the saved snapshot without contacting the tenant or changing site configuration. It also adds PNG to older diagrams that previously had only vector exports.
+For a saved diagram made with an older layout, choose **Download site diagram → Update diagram layout**. The button shows progress, then opens the updated diagram with its download options. This redraws PNG/SVG/VSDX from the saved snapshot without contacting the tenant or changing site configuration. It also adds PNG to older diagrams that previously had only vector exports.
+
+The ZPA service card appears even when App Connector provisioning or application segment creation is not selected. It shows the service in the topology; it does not confirm provisioning or a live connection. Each VLAN’s IP app badge still reflects whether segment creation was requested and verified. Updating an older diagram’s layout also adds the ZPA card.
+
+If site creation failed or its outcome is unknown, no deployed-site diagram is saved. You can still preview and download the planned diagram under **Branch settings → Diagram details**.
 
 The bundled Exchange cloud is vector artwork from page 1 of the public [Zscaler Zero Trust Branch data sheet](https://www.zscaler.com/resources/data-sheets/zscaler-zero-trust-branch.pdf), © Zscaler, Inc. Appliance reference photos for ZT400, ZT600, ZT800, and ZT8010 come from page 4 of the same data sheet. A small photo appears in the title area, separately from the connected topology symbols. The template's `platform_type` selects the photo, including for custom or site-specific cloned templates. VM and unrecognized platforms do not get a guessed hardware photo. Older snapshots without a platform field may use an unambiguous model in the saved template name; custom names alone cannot identify hardware.
 

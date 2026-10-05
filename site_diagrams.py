@@ -148,8 +148,7 @@ def planned(row, vlans, settings=None, ports=None):
         model['ha_links'],model['ha_notes']=ha_interfaces(ports or {},model['mode'])
     if row.get('location_type', 'none') != 'none':
         model['services'].append(dict(name='ZIA', state='planned', label='Internet & SaaS'))
-    if row.get('appc_provision') == '1':
-        model['services'].append(dict(name='ZPA', state='planned', label='Private applications'))
+    model['services'].append(dict(name='ZPA', state='planned' if row.get('appc_provision') == '1' else 'context', label='Private applications'))
     decorate(model)
     return model
 
@@ -228,7 +227,7 @@ def capture(engine, prepared, outcome):
     if incomplete:
         model['warnings'].append('Incomplete deployment stages: '+', '.join(incomplete)+'. Inspect the run report before recovery.')
     for item in model['gateways'] + model['wans'] + model['networks'] + model['ha_links'] + model['services']:
-        item['state'] = 'unverified'
+        if item['state'] != 'context':item['state'] = 'unverified'
     for net in model['networks']:
         net['access']['state'] = 'unverified'
         if net['ip_app_segment']['state'] == 'planned':net['ip_app_segment']['state'] = 'unverified'

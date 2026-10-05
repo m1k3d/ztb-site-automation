@@ -786,7 +786,19 @@ function renderDeployment() {
   $('deployment-message').textContent=deploymentJob.message || 'Preview checks the tenant without creating resources.';
   if(deploymentJob.state==='ready' && !ready)$('deployment-message').textContent='The workspace changed or was reloaded. Restore your inputs and preview again before deploying.';
   if(deploymentJob.tenant)$('connection-summary').textContent=`Destination: ${deploymentJob.tenant}${deploymentJob.zpa_cloud ? ' · ZPA: '+deploymentJob.zpa_cloud+(deploymentJob.zpa_customer ? ' · Customer '+deploymentJob.zpa_customer : '') : ''}`;
-  const target=$('deployment-results');target.replaceChildren();
+  renderDeploymentResults(active);
+  if(deploymentJob.report && !active && diagramFinishedRun!==deploymentJob.report){diagramFinishedRun=deploymentJob.report;diagrams?.refresh();}
+  if(deploymentJob.progress)$('deployment-message').textContent=`${deploymentJob.progress.site} · ${deploymentJob.progress.stage}: ${deploymentJob.progress.state}`;
+}
+function renderDeploymentResults(active) {
+  const target=$('deployment-results');
+  const scope=JSON.stringify([projectSaver?.project?.id,deploymentJob.project_id,deploymentJob.id]);
+  const key=JSON.stringify([scope,active,deploymentJob.issues,deploymentJob.sites,deploymentJob.details,deploymentJob.stage_progress]);
+  if(target.renderKey===key)return;
+  // Keep the DOM for unchanged polls, and preserve disclosures when stages advance.
+  const open=new Map();
+  if(target.renderScope===scope)for(const detail of target.querySelectorAll('details[data-disclosure-key]'))open.set(detail.dataset.disclosureKey,detail.open);
+  target.replaceChildren();
   for(const issue of deploymentJob.issues || [])target.append(node('p',`${issue.row ? 'Row '+issue.row+' · ' : ''}${issue.message}`,'deployment-issue'));
   const sites=deploymentJob.sites?.length ? deploymentJob.sites : (deploymentJob.details || []).map(detail=>({name:detail.name,status:active ? 'pending' : 'preview',stages:{}}));
   for(const site of (deploymentJob.project_id && deploymentJob.project_id!==projectSaver?.project?.id ? [] : sites)) {
@@ -796,9 +808,11 @@ function renderDeployment() {
     const badge=node('span',labels[site.status] || site.status,'pill');badge.dataset.tone=tone;
     heading.append(node('strong',site.name),badge);row.append(heading);
     if(site.artifacts)row.append(diagrams.actions(site.artifacts,site.name));
+    else if(['template_only','failed'].includes(site.status))row.append(node('p','No deployed site diagram is available because site creation was not confirmed. A planned diagram is available in Branch settings → Diagram details.','addressing-help'));
     if(site.diagram_warning)row.append(node('p',site.diagram_warning,'deployment-warning'));
     if(site.status==='success')row.append(node('p','Configuration created. Appliance activation and tunnel health have not been tested.','addressing-help'));
     const configuration=node('details',undefined,'deployment-detail');configuration.append(node('summary','Configuration details'));
+    configuration.dataset.disclosureKey=JSON.stringify([site.name,'configuration']);
     configuration.open=['partial','failed','template_only','template_failed'].includes(site.status);
     const summaryChildren=row.children.length;
     const stages={...(deploymentJob.stage_progress?.[site.name] || {}),...(site.stages || {})};
@@ -845,13 +859,13 @@ function renderDeployment() {
       for(const rule of breakout.rules || []) {
         const item=node('li'), destinations=rule.destination_keys.map(key=>plannedObjects.get(key)?.name || key);
         item.append(node('strong',rule.name),node('p',rule.ports.join(' · '),'ucaas-ports'));
-        const pairing=node('details');pairing.append(node('summary','Destination and Port objects'),node('p',destinations.join(' + ')),node('p',plannedObjects.get(rule.port_key)?.name || rule.port_key));item.append(pairing);rules.append(item);
+        const pairing=node('details');pairing.dataset.disclosureKey=JSON.stringify([site.name,'rule',rule.name]);pairing.append(node('summary','Destination and Port objects'),node('p',destinations.join(' + ')),node('p',plannedObjects.get(rule.port_key)?.name || rule.port_key));item.append(pairing);rules.append(item);
       }
       row.append(rules,node('h4','Reusable objects'));
       const objects=node('ul',undefined,'ucaas-object-review');
       for(const object of breakout.objects || []) {
         const item=node('li'), description=`${object.status || object.action}: ${object.name}${object.id ? ' · ID '+object.id : ''}${object.values ? ' · '+object.values.length+(object.type==='l4port' ? ' protocol/port sets' : ' destinations') : ''}`;
-        if(object.values) {const destinations=node('details');destinations.append(node('summary',description),node('pre',object.values.join('\n')));item.append(destinations);}
+        if(object.values) {const destinations=node('details');destinations.dataset.disclosureKey=JSON.stringify([site.name,'object',object.key || object.name]);destinations.append(node('summary',description),node('pre',object.values.join('\n')));item.append(destinations);}
         else item.textContent=description;
         objects.append(item);
       }
@@ -863,8 +877,8 @@ function renderDeployment() {
     if(site.next_action)row.append(node('p',site.next_action,'addressing-help'));
     row.append(configuration);target.append(row);
   }
-  if(deploymentJob.report && !active && diagramFinishedRun!==deploymentJob.report){diagramFinishedRun=deploymentJob.report;diagrams?.refresh();}
-  if(deploymentJob.progress)$('deployment-message').textContent=`${deploymentJob.progress.site} · ${deploymentJob.progress.stage}: ${deploymentJob.progress.state}`;
+  for(const detail of target.querySelectorAll('details[data-disclosure-key]'))if(open.has(detail.dataset.disclosureKey))detail.open=open.get(detail.dataset.disclosureKey);
+  target.renderScope=scope;target.renderKey=key;
 }
 async function pollDeployment(restore=false) {
   clearTimeout(deploymentPoll);
@@ -872,8 +886,8 @@ async function pollDeployment(restore=false) {
     const previous=deploymentJob.state;
     deploymentJob=await api('/api/deployment/status',{});renderDeployment();updateSummary();
     if(previous!==deploymentJob.state && !deploymentActive())rollout?.refresh(true);
-    if(restore && deploymentJob.state!=='idle')showView('review');
-    if(deploymentActive()){showView('review');deploymentPoll=setTimeout(pollDeployment,1000);}
+    if(workspaceView!=='review' && ((restore && deploymentJob.state!=='idle') || deploymentActive()))showView('review');
+    if(deploymentActive())deploymentPoll=setTimeout(pollDeployment,1000);
   } catch(error) {
     $('deployment-message').textContent='Connection to the local app was lost. Keep it running; reconnecting will not start another deployment.';
     if(deploymentActive())deploymentPoll=setTimeout(pollDeployment,2000);

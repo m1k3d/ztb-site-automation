@@ -33,6 +33,21 @@ def example(ha=False, enhanced=False, count=4):
 
 
 class DiagramTests(unittest.TestCase):
+    def test_zpa_service_is_visible_without_provisioning_or_segment_selection(self):
+        row,vlans,settings,ports=example()
+        row['appc_provision']='0'
+        model=planned(row,vlans,settings,ports)
+        self.assertEqual(next(s['state'] for s in model['services'] if s['name']=='ZPA'),'context')
+        self.assertTrue(all(net['ip_app_segment']['state']=='not_selected' for net in model['networks']))
+        for legacy in (False,True):
+            if legacy:model['services']=[s for s in model['services'] if s['name']!='ZPA']
+            before=deepcopy(model)
+            drawing=scene(model)
+            self.assertIn('service-ZPA',drawing.groups)
+            self.assertTrue(any(e['source']=='gw-a' and e['target']=='service-ZPA' for e in drawing.edges))
+            self.assertIn(b'Zscaler Private Access',svg(model))
+            self.assertEqual(model,before,'rendering must not rewrite saved evidence')
+
     def test_addressing_exclusion_colors_and_shared_circuits(self):
         row,vlans,settings,ports=example(True)
         row['diagram_options_json']=json.dumps({'switch':'Access stack','uplinks':{'a:ge7:':{'circuit':'Fiber','name':'ISP A'},'b:ge7:':{'circuit':'Fiber'}}})
