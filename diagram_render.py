@@ -530,7 +530,7 @@ def scene(model):
     for count in range(3,min(9,max(3,len(blocks)))+1):
         width=max(1880,count*568+76)
         title_h=line_count(model['name'],32,width-640)*43.2
-        header=68+title_h+line_count(identity,14,width-100)*19+25
+        header=114+title_h+line_count(identity,14,width-100)*19+25
         low=max((b['height']+57 for b in blocks),default=0);high=sum(b['height']+57 for b in blocks)+1
         for _ in range(20):
             capacity=(low+high)/2
@@ -548,20 +548,21 @@ def scene(model):
     from diagram_branding import logo
     brand=logo(model.get('options',{}).get('logo'))
     if brand:
-        scale=min(120/brand['width'],36/brand['height'])
+        scale=min(240/brand['width'],72/brand['height'])
         w,h=brand['width']*scale,brand['height']*scale
-        s.add('image',x=38,y=16+(36-h)/2,w=w,h=h,data=base64.b64decode(brand['content']),
+        s.add('image',x=38,y=16+(72-h)/2,w=w,h=h,data=base64.b64decode(brand['content']),
               name='Customer logo',asset='customer-logo.png')
     else:
-        wordmark(s,38,23,115)
-    s.label(174,28,'ZERO TRUST BRANCH   /   SITE DESIGN & AS-BUILT',12,BLUE,True,width-610)
-    s.label(38,55,model['name'],32,INK,True,width-640)
+        art=wordmark_artwork()
+        wordmark(s,38,16+(72-230*art['height']/art['width'])/2,230)
+    s.label(302,44,'ZERO TRUST BRANCH   /   SITE DESIGN & AS-BUILT',12,BLUE,True,width-900)
+    s.label(38,101,model['name'],32,INK,True,width-640)
     hardware=appliance_model(model)
     if hardware:
         photo,(pw,ph)=appliance_photo(hardware);photo_width=170
         s.add('image',x=width-555,y=23,w=photo_width,h=photo_width*ph/pw,data=photo,name=hardware+' appliance reference')
         s.label(width-577,89,hardware+' · appliance reference',11,MUTED,width=214,align='center')
-    s.label(38,63+title_h,identity,14,MUTED,width=width-100)
+    s.label(38,109+title_h,identity,14,MUTED,width=width-100)
     modes={'standalone':'STANDALONE','standard_mode_ha':'STANDARD HA','wan_edge_mode_ha':'ENHANCED HA','ha_unverified':'HA · MODE UNVERIFIED'}
     s.label(width-330,29,modes.get(model['mode'],'HA'),14,INK,True,292,'right')
     badge='PLANNED CONFIGURATION' if model['evidence']=='planned' else 'CONFIGURATION SNAPSHOT'

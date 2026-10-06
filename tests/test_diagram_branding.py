@@ -75,7 +75,7 @@ class BrandingTests(unittest.TestCase):
         pictures=[i for i in rendered.items if i['kind']=='image']
         self.assertEqual(len(pictures),2)
         customer=next(i for i in pictures if i['name']=='Customer logo')
-        self.assertLessEqual(customer['w'],120);self.assertLessEqual(customer['h'],36)
+        self.assertLessEqual(customer['w'],240);self.assertLessEqual(customer['h'],72)
         self.assertAlmostEqual(customer['w']/customer['h'],3)
         self.assertEqual(svg(model).count(b'data:image/png;base64,'),2)
         self.assertTrue(png(model).startswith(b'\x89PNG'))
