@@ -15,7 +15,7 @@ from deployment_engine import DeploymentEngine
 from input_validation import validate_rows
 from run_report import save_report
 from template_cloning import read_rows
-from ui_deployment import plan_digest, public_sites, run_worker
+from ui_deployment import plan_digest, public_sites, public_issues, run_worker
 
 
 def row(name="Branch", **overrides):
@@ -84,6 +84,49 @@ class TemplateCloningTests(unittest.TestCase):
         self.assertEqual(result.sites[0].template['status'], 'planned')
         self.engine.post_json.assert_not_called()
         self.engine.create_site.assert_not_called()
+
+    def test_source_lookup_distinguishes_missing_and_duplicate_names(self):
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                values=row(template_name='Missing')
+                if duplicate:
+                    self.templates['other']={**self.templates['source-id'],'id':'other'}
+                    values=row()
+                plan=self.engine.plan(validate_rows([values]))
+                self.assertEqual(plan.issues[0].field,'template_ambiguous' if duplicate else 'template_not_found')
+                self.assertIn('template',public_issues(plan.issues)[0]['message'].lower())
+                self.engine.execute(plan)
+                self.engine.post_json.assert_not_called();self.engine.create_site.assert_not_called()
+
+    def test_http_lookup_errors_expose_only_safe_diagnostics(self):
+        self.engine.get_json=DeploymentEngine.get_json.__get__(self.engine)
+        for status,code in ((401,'template_auth'),(403,'template_forbidden'),(404,'template_endpoint'),
+                            (429,'template_rate_limit'),(500,'template_response'),(200,'template_response')):
+            with self.subTest(status=status):
+                response=Mock(status_code=status,text='private-response-token')
+                response.json.side_effect=ValueError('private-response-token')
+                self.engine._request_with_auto_refresh=Mock(return_value=response)
+                plan=self.engine.plan(validate_rows([row()]))
+                self.assertEqual(plan.issues[0].field,code)
+                self.assertNotIn('private-response-token',json.dumps(public_issues(plan.issues)))
+                self.engine.execute(plan)
+                self.engine.create_site.assert_not_called();self.engine.post_json.assert_not_called()
+
+    def test_lookup_transport_and_inventory_errors_are_distinct(self):
+        for error,code in ((requests.Timeout('private'),'template_timeout'),
+                           (requests.ConnectionError('private'),'template_connection'),
+                           (ValueError('private'),'template_inventory')):
+            with self.subTest(code=code):
+                self.engine.get_json.side_effect=error
+                plan=self.engine.plan(validate_rows([row()]))
+                self.assertEqual(plan.issues[0].field,code)
+                self.assertNotIn('private',json.dumps(public_issues(plan.issues)))
+
+    def test_explicit_source_id_resolves_duplicate_names_without_choosing_arbitrarily(self):
+        self.templates['other']={**self.templates['source-id'],'id':'other'}
+        plan=self.plan([row(template_id='source-id')])
+        self.assertEqual(plan.sites[0].template_clone.source_id,'source-id')
+        self.engine.post_json.assert_not_called();self.engine.create_site.assert_not_called()
 
     def test_each_clone_is_created_and_verified_before_its_site_uses_the_new_id(self):
         result = self.engine.execute(self.plan([row('One'),row('Two')]))

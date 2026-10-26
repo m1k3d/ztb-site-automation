@@ -71,7 +71,8 @@ def public_sites(result):
 def public_issues(issues):
     # Exception strings can contain raw HTTP bodies. Expose a useful, fixed action per field.
     from site_payload import TEMPLATE_MESSAGES
-    messages = {**TEMPLATE_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, **HA_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
+    from deployment_engine import TEMPLATE_LOOKUP_MESSAGES
+    messages = {**TEMPLATE_MESSAGES, **TEMPLATE_LOOKUP_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, **HA_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
                 "Template clone": "Cannot verify the source template and its configuration. Check the source template and read permissions.",
                 "new_template_name": "Each new template needs a unique name that is not already in use. Choose a new name, or select Use an existing template.",
                 "location": "Check the ZIA location choice, name, template, and tenant permissions.",

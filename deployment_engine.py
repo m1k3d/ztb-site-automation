@@ -27,6 +27,31 @@ POLL_DELAY_S = 2.0
 SITE_INVENTORY_LIMIT = 10_000
 SITE_INVENTORY_PAGE_SIZE = 100
 
+TEMPLATE_LOOKUP_MESSAGES = {
+    'template_not_found': 'No template matches the source name in the connected tenant. Check the tenant and Template to copy, or enter the original template ID under Advanced settings.',
+    'template_ambiguous': 'More than one template matches the source name. Enter the original template ID under Advanced settings.',
+    'template_auth': 'Template lookup was rejected with HTTP 401. Reconnect to the ZTB tenant, then preview again.',
+    'template_forbidden': 'The API denied template lookup with HTTP 403. Check template read access for the connected account.',
+    'template_endpoint': 'The template list endpoint returned HTTP 404. Check the ZTB API base URL and connected tenant.',
+    'template_rate_limit': 'Template lookup was rate-limited (HTTP 429). Wait briefly, then preview again.',
+    'template_timeout': 'Template lookup timed out. Check connectivity from the machine running Docker, then preview again.',
+    'template_connection': 'Could not connect to the template API. Check network, proxy and TLS access from the machine running Docker.',
+    'template_response': 'The template API returned an unsuccessful or unreadable response. Refresh interfaces to check the connection, then preview again.',
+    'template_inventory': 'The API template list was incomplete or inconsistent. Refresh interfaces and preview again; no resources were created.',
+}
+
+
+class TemplateLookupError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(TEMPLATE_LOOKUP_MESSAGES[code])
+
+
+class ApiReadError(RuntimeError):
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        super().__init__(message)
+
 
 @dataclass
 class PreparedSite:
@@ -100,7 +125,7 @@ class TemplateResolver:
         hits = self._by_lower_name.get(name.strip().lower(), [])
         if len(hits) == 1:
             return hits[0].get("id")
-        return None
+        raise TemplateLookupError('template_ambiguous' if hits else 'template_not_found')
 
 
 class LocationResolver:
@@ -257,6 +282,8 @@ class DeploymentEngine:
                 stage = 'Additional WANs'
                 wans = self.additional_wans.plan(row, template_id)
                 plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan, template_clone, ucaas_plan, dns_plan, wans, deepcopy(settings)))
+            except TemplateLookupError as exc:
+                plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
             except HaError as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
             except TemplateSettingsError as exc:
@@ -270,7 +297,21 @@ class DeploymentEngine:
             except TemplateCloneError as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, "new_template_name", "A template with this name already exists. Choose a new name or use the existing template."))
             except (Exception, SystemExit) as exc:
-                plan.issues.append(ValidationIssue(site.source, site.row_number, stage, f"{row.get('site_name')}: {exc}"))
+                if stage == 'template_name/template_id':
+                    if isinstance(exc, ApiReadError):
+                        code = {401:'template_auth', 403:'template_forbidden', 404:'template_endpoint',
+                                429:'template_rate_limit'}.get(exc.status_code, 'template_response')
+                    elif isinstance(exc, requests.Timeout):
+                        code = 'template_timeout'
+                    elif isinstance(exc, requests.ConnectionError):
+                        code = 'template_connection'
+                    elif isinstance(exc, ValueError):
+                        code = 'template_inventory'
+                    else:
+                        code = 'template_response'
+                    plan.issues.append(ValidationIssue(site.source, site.row_number, code, TEMPLATE_LOOKUP_MESSAGES[code]))
+                else:
+                    plan.issues.append(ValidationIssue(site.source, site.row_number, stage, f"{row.get('site_name')}: {exc}"))
         if wants_zpa and not plan.issues:
             try:
                 plan.zpa_context = zpa_provisioning.prepare_zpa(self.config)
@@ -503,11 +544,11 @@ class DeploymentEngine:
         r = self._request_with_auto_refresh("GET", url, params=params, headers=headers, timeout=60)
         self._d("GET", getattr(r, "url", url), r.status_code)
         if r.status_code != 200:
-            raise RuntimeError(f"GET {url} -> {r.status_code}: {r.text[:300]}")
+            raise ApiReadError(r.status_code, f"GET {url} -> {r.status_code}: {r.text[:300]}")
         try:
             return r.json()
         except Exception:
-            raise ValueError(f"Non-JSON response from {url}: {r.text[:300]}")
+            raise ApiReadError(r.status_code, f"Non-JSON response from {url}: {r.text[:300]}") from None
 
 
     def post_raw(self, url: str, data: str, headers: Optional[Dict[str, str]] = None, timeout: int = 90) -> requests.Response:
@@ -572,9 +613,7 @@ class DeploymentEngine:
         if resolved:
             row["template_id"] = resolved
             return True, resolved, None
-        all_items = self.get_json_v3_templates()
-        names_hint = ", ".join(sorted({it.get("name","") for it in all_items if it.get("name")}))
-        return False, None, f"could not resolve template_id from template_name='{tname}'. Available names: {names_hint}"
+        raise TemplateLookupError('template_inventory')
 
 
     def get_json_v3_locations(self) -> List[Dict[str, Any]]:

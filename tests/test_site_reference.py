@@ -1,4 +1,5 @@
 import unittest
+import requests
 from unittest.mock import Mock, patch
 
 from automation_config import Settings
@@ -43,6 +44,27 @@ class ReferenceSitesTests(unittest.TestCase):
         self.reader.connect({"tenant_url": "https://example-api.goairgap.com", "api_key": "session-key"})
         self.load.assert_not_called()
         self.assertEqual(self.factory.call_args.args[0].api_key, "session-key")
+
+    def test_template_transport_errors_are_specific_without_exposing_response_text(self):
+        self.connect()
+        for error,message in ((requests.exceptions.SSLError('private-key'),'TLS verification failed'),
+                              (requests.Timeout('private-key'),'timed out'),
+                              (requests.ConnectionError('private-key'),'Could not connect'),
+                              (RuntimeError('private-key'),'Authentication or token refresh')):
+            with self.subTest(message=message):
+                self.client.request.side_effect=error
+                with self.assertRaises(ReferenceError) as caught:
+                    self.reader.interfaces('Reference',refresh=True)
+                self.assertIn(message,str(caught.exception))
+                self.assertNotIn('private-key',str(caught.exception))
+
+    def test_non_json_template_response_is_not_reported_as_a_missing_template(self):
+        self.connect()
+        self.client.request.return_value=self.response(None)
+        self.client.request.return_value.json.side_effect=ValueError('private response')
+        with self.assertRaisesRegex(ReferenceError,'unreadable response') as caught:
+            self.reader.interfaces('Reference',refresh=True)
+        self.assertNotIn('private response',str(caught.exception))
 
     def test_zone_lookup_returns_only_assignable_names_and_types(self):
         self.connect()

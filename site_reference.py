@@ -89,11 +89,22 @@ class ReferenceSites:
                 headers={"Origin": self.client.origin, "Referer": self.client.referer})
             if response.status_code != 200:
                 raise ReferenceError(f"Unable to read {label} (HTTP {response.status_code}). Check the connection and API permissions.")
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                raise ReferenceError(f"The {label} API returned an unreadable response (HTTP 200). Check the tenant API URL and any proxy or sign-in interception.") from None
         except ReferenceError:
             raise
-        except (requests.RequestException, RuntimeError, ValueError, OSError):
-            raise ReferenceError(f"Unable to read {label}. Check your tenant URL, API key, and network connection, then reconnect.") from None
+        except requests.exceptions.SSLError:
+            raise ReferenceError(f"TLS verification failed while reading {label}. Check certificate trust and any inspection proxy on the machine running Docker.") from None
+        except requests.Timeout:
+            raise ReferenceError(f"Reading {label} timed out. Check network access from the machine running Docker, then retry.") from None
+        except (requests.ConnectionError, OSError):
+            raise ReferenceError(f"Could not connect to the {label} API. Check the tenant API URL, network and proxy access from the machine running Docker.") from None
+        except (RuntimeError, ValueError):
+            raise ReferenceError(f"Authentication or token refresh could not complete while reading {label}. Reconnect with the tenant API URL and API key, then retry.") from None
+        except requests.RequestException:
+            raise ReferenceError(f"The request to read {label} failed. Reconnect and check API access from the machine running Docker.") from None
 
     @staticmethod
     def _rows(data, label, *, allow_list=False):
