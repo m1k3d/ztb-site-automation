@@ -5,7 +5,9 @@ policy access, reuses existing resources, or retries resource creation.
 """
 
 from dataclasses import dataclass
+import hashlib
 import ipaddress
+import json
 import re
 
 import requests
@@ -37,6 +39,8 @@ class SegmentPlan:
     server_group_name: str
     application_name: str
     subnets: tuple
+    overlaps: tuple = ()
+    overlap_acknowledged: bool = False
 
     def report(self):
         return {
@@ -51,6 +55,8 @@ class SegmentPlan:
             "udp_ports": "1-52,54-65535",
             "health_reporting": "ON_ACCESS",
             "resources": {},
+            "overlaps": list(self.overlaps),
+            "overlap_acknowledged": self.overlap_acknowledged,
         }
 
 
@@ -146,14 +152,30 @@ def _ip_network(value):
         return None  # DNS names cannot be resolved safely into a static overlap proof.
 
 
-def check_conflicts(plan, inventory):
+def containment_record(plan, application, existing, subnet):
+    # Pin the exception to the existing resource's access and connector settings.
+    # Hash only known configuration fields; never expose raw API response data.
+    settings = {key: application.get(key) for key in (
+        'id', 'name', 'domainNames', 'enabled', 'tcpPortRange', 'udpPortRange', 'tcpPortRanges',
+        'udpPortRanges', 'segmentGroupId', 'serverGroups', 'bypassType', 'icmpAccessType',
+        'ipAnchored', 'doubleEncrypt', 'matchStyle', 'healthReporting')}
+    fingerprint = hashlib.sha256(json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    record = dict(site_name=plan.site_name, application_id=str(application['id']),
+                  application_name=resource_label(application['name']), existing_subnet=str(existing),
+                  new_subnet=str(subnet), enabled=application.get('enabled') if type(application.get('enabled')) is bool else None,
+                  configuration_digest=fingerprint)
+    record['confirmation_id'] = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return record
+
+
+def check_conflicts(plan, inventory, *, review_contained=False):
     names = dict(zip(COLLECTIONS, (plan.segment_group_name, plan.server_group_name, plan.application_name)))
     for resource, name in names.items():
         for row in inventory[resource]:
             if row["name"].strip().casefold() == name.casefold():
                 raise SegmentConflict(f"ZPA {resource} '{name}' already exists; inspect it before recovery")
     planned = [ipaddress.ip_network(n) for n in plan.subnets]
-    conflicts = []
+    conflicts, contained = [], {}
     for application in inventory["application"]:
         domains = application.get("domainNames")
         if not isinstance(domains, list) or not all(isinstance(d, str) for d in domains):
@@ -163,7 +185,13 @@ def check_conflicts(plan, inventory):
             overlaps = [str(n) for n in planned if domain.strip() == "*" or
                         (existing and existing.version == n.version and existing.overlaps(n))]
             if overlaps:
-                conflicts.append(f"{', '.join(overlaps)} overlaps '{resource_label(application['name'])}' ({str(existing) if existing else '*'})")
+                for value in overlaps:
+                    subnet = ipaddress.ip_network(value)
+                    if review_contained and existing and subnet != existing and subnet.subnet_of(existing):
+                        record = containment_record(plan, application, existing, subnet)
+                        contained[record['confirmation_id']] = record
+                    else:
+                        conflicts.append(f"{value} overlaps '{resource_label(application['name'])}' ({str(existing) if existing else '*'})")
     if conflicts:
         detail = "; ".join(conflicts[:5])
         if len(conflicts) > 5:
@@ -171,15 +199,16 @@ def check_conflicts(plan, inventory):
         raise SegmentConflict(f"ZPA destinations for '{resource_label(plan.site_name)}': {detail}. "
             "For a new branch, set an unused destination address in VLANs, including the management IP if selected, "
             "or deselect a network that should not be published. Existing ZPA segments are unchanged.")
+    return sorted(contained.values(), key=lambda item: item['confirmation_id'])
 
 
-def check_batch_conflicts(plans, inventory):
-    names, networks = set(), []
+def check_batch_conflicts(plans, inventory, *, review_contained=False):
+    names, networks, overlaps = set(), [], {}
     for plan in plans:
         if plan.application_name in names:
             raise SegmentConflict("Selected sites generate the same ZPA application name")
         names.add(plan.application_name)
-        check_conflicts(plan, inventory)
+        overlaps[plan.site_name] = check_conflicts(plan, inventory, review_contained=review_contained)
         for value in plan.subnets:
             network = ipaddress.ip_network(value)
             for other_site, other in networks:
@@ -188,6 +217,7 @@ def check_batch_conflicts(plans, inventory):
                         f"'{resource_label(other_site)}' ({other}). Set distinct branch addresses in VLANs, including management IPs, "
                         "or deselect a network that should not be published.")
             networks.append((plan.site_name, network))
+    return overlaps
 
 
 def _linked_ids(data, key):
@@ -244,7 +274,12 @@ def stage_segments(context, plan, connector_group_id, report, *, emit=print):
     if not _identifier(connector_group_id):
         raise ValueError("ZPA staging requires the App Connector group ID created by this run")
     # Recheck immediately before writes; plans can become stale during ZTB deployment.
-    check_conflicts(plan, load_inventory(context))
+    current = check_conflicts(plan, load_inventory(context), review_contained=plan.overlap_acknowledged)
+    if current != list(plan.overlaps):
+        report['overlap_verification'] = 'changed'
+        raise SegmentConflict('ZPA summary coverage changed after confirmation. Preview again before recovery.')
+    if current:
+        report['overlap_verification'] = 'confirmed'
     description = f"Staged by ztb-site-automation for {plan.site_name}. Review policy and destinations before enabling."
     group_id, group = _create(context, "segmentGroup", {
         "name": plan.segment_group_name, "description": description, "enabled": True,

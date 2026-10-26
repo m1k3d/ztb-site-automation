@@ -794,15 +794,42 @@ function renderDeployment() {
   $('preview-deployment').hidden=!batch.length;
   $('preview-deployment').classList.toggle('primary',deploymentJob.state!=='ready');
   $('preview-deployment').textContent=deploymentJob.state==='previewing' ? 'Checking tenant…' : 'Preview deployment';
-  $('start-deployment').hidden=deploymentJob.state!=='ready';$('start-deployment').disabled=!ready || active;
+  const overlapsConfirmed=renderZpaOverlapReview(ready,active);
+  $('start-deployment').hidden=deploymentJob.state!=='ready';$('start-deployment').disabled=!ready || active || !overlapsConfirmed;
   $('start-deployment').textContent=`Deploy ${deploymentJob.site_count || 0} site${deploymentJob.site_count===1 ? '' : 's'}`;
   $('deployment-report').hidden=!deploymentJob.report || active;
   $('deployment-message').textContent=deploymentJob.message || 'Preview checks the tenant without creating resources.';
   if(deploymentJob.state==='ready' && !ready)$('deployment-message').textContent='The workspace changed or was reloaded. Restore your inputs and preview again before deploying.';
+  if(ready && !overlapsConfirmed){$('deployment-title').textContent='Review ZPA summary overlaps';$('deployment-message').textContent='Tenant checks passed. Acknowledge the summary coverage below to allow disabled application segment staging.';}
   if(deploymentJob.tenant)$('connection-summary').textContent=`Destination: ${deploymentJob.tenant}${deploymentJob.zpa_cloud ? ' · ZPA: '+deploymentJob.zpa_cloud+(deploymentJob.zpa_customer ? ' · Customer '+deploymentJob.zpa_customer : '') : ''}`;
   renderDeploymentResults(active);
   if(deploymentJob.report && !active && diagramFinishedRun!==deploymentJob.report){diagramFinishedRun=deploymentJob.report;diagrams?.refresh();}
   if(deploymentJob.progress)$('deployment-message').textContent=`${deploymentJob.progress.site} · ${deploymentJob.progress.stage}: ${deploymentJob.progress.state}`;
+}
+function renderZpaOverlapReview(ready,active) {
+  const host=$('zpa-overlap-review'), overlaps=deploymentJob.zpa_overlaps || [];
+  const scope=JSON.stringify([deploymentJob.id,overlaps,ready]);
+  host.hidden=deploymentJob.state!=='ready' || !overlaps.length;
+  host.inert=active || !ready;
+  if(host.confirmationScope!==scope){
+    host.confirmationScope=scope;host.confirmed=new Set();host.replaceChildren();
+    if(overlaps.length){
+      host.append(node('h3','Existing ZPA summary coverage'),
+        node('p','These branch subnets are inside existing application segments. Confirm each overlap to stage the new segment disabled. Existing segments and access policies stay unchanged.','addressing-help'));
+      for(const overlap of overlaps){
+        const entry=node('div',undefined,'zpa-overlap-entry');
+        entry.append(node('strong',`${overlap.site_name} · ${overlap.new_subnet}`),
+          node('p',`Covered by “${overlap.application_name}” · ${overlap.existing_subnet} · ${overlap.enabled===true ? 'Enabled' : overlap.enabled===false ? 'Disabled' : 'Status unknown'}`,'addressing-help'));
+        const label=node('label',undefined,'check-label'),check=node('input');check.type='checkbox';
+        check.dataset.overlapId=overlap.confirmation_id;check.disabled=!ready || active;
+        check.onchange=()=>{if(check.checked)host.confirmed.add(overlap.confirmation_id);else host.confirmed.delete(overlap.confirmation_id);renderDeployment();};
+        label.append(check,node('span',`I acknowledge this overlap for ${overlap.new_subnet}. Create the new application segment disabled.`));
+        entry.append(label);host.append(entry);
+      }
+      host.append(node('p','Before enabling the new segment, review access policies and connector reachability: ZPA can match the more specific subnet. Confirmation applies only to this preview.','addressing-help'));
+    }
+  }
+  return overlaps.every(overlap=>host.confirmed.has(overlap.confirmation_id));
 }
 function renderDeploymentResults(active) {
   const target=$('deployment-results');
@@ -856,6 +883,8 @@ function renderDeploymentResults(active) {
     }
     if(site.template?.id)row.append(node('p',`Created template: ${site.template.name} · ID: ${site.template.id}`,'addressing-help'));
     if(site.segment?.subnets?.length)row.append(node('p',`ZPA segment destinations: ${site.segment.subnets.join(', ')}`,'addressing-help'));
+    if(site.segment?.overlap_acknowledged)row.append(node('p',`ZPA summary overlap acknowledged for ${site.segment.overlaps?.length || 0} destination match(es). New application segment requested disabled; existing summary segments unchanged.`,'addressing-help'));
+    if(site.segment?.overlap_verification==='changed')row.append(node('p','Summary coverage changed after confirmation. ZPA segment creation stopped; inspect the deployment before recovery.','deployment-warning'));
     const extraWans=site.additional_wans?.requested || detail?.additional_wans || [];
     if(extraWans.length){
       row.append(node('h4','Additional WANs'));
@@ -926,9 +955,11 @@ $('preview-deployment').onclick=async()=>{
 };
 $('start-deployment').onclick=async()=>{
   if(deploymentActive() || deploymentJob.state!=='ready' || previewSnapshot!==deploymentSnapshot())return;
+  const confirmations=[...($('zpa-overlap-review').confirmed || [])];
+  if(!(deploymentJob.zpa_overlaps || []).every(item=>confirmations.includes(item.confirmation_id)))return;
   if(!confirm(`Deploy ${deploymentJob.site_count} selected site(s) to ${deploymentJob.tenant}? This creates tenant resources.`))return;
   deploymentStarting=true;renderDeployment();
-  try{deploymentJob=await api('/api/deployment/start',{preview_id:deploymentJob.id,batch,project_id:projectSaver?.project?.id});}
+  try{deploymentJob=await api('/api/deployment/start',{preview_id:deploymentJob.id,batch,project_id:projectSaver?.project?.id,zpa_overlap_confirmations:confirmations});}
   catch(error){
     if(error.status){deploymentJob={...deploymentJob,state:'expired',message:error.message};previewSnapshot=null;}
     else deploymentJob={...deploymentJob,state:'deploying',message:'Checking whether deployment started. Do not submit another run.'};

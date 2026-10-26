@@ -59,6 +59,19 @@ class SessionTests(unittest.TestCase):
             self.session.deploy(identifier, rows())
         self.assertEqual(self.start.call_count, 1)
 
+    def test_summary_overlap_requires_every_exact_confirmation(self):
+        identifier=self.ready()
+        self.session.job['zpa_overlaps']=[{'confirmation_id':'first'},{'confirmation_id':'second'}]
+        for approvals in (None,[],['first'],['first','wrong'],['first','second','extra'],['first','first','second'],True,{'first':True}):
+            with self.subTest(approvals=approvals),self.assertRaisesRegex(ValueError,'Confirm each'):
+                self.session.deploy(identifier,rows(),approvals)
+        self.start.assert_called_once_with('preview')
+        self.session.deploy(identifier,rows(),['second','first'])
+        self.assertEqual(self.session.overlap_confirmations,['second','first'])
+        self.session.job['state']='completed'
+        self.session.preview(rows())
+        self.assertEqual(self.session.overlap_confirmations,[])
+
     def test_connection_change_and_second_preview_block_while_running(self):
         self.session.preview(rows())
         action = Mock()

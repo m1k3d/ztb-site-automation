@@ -36,6 +36,8 @@ The CLI reserves a report before running the engine and writes the final summary
 
 LAN staging adds a `ZPA segments` stage after successful VLAN and ZPA provisioning. The exact App Connector group ID is passed from creation; no name lookup or fallback group is used. `SiteResult.zpa_segments` contains only planned settings and resource metadata, never a provisioning key or bearer token. ZPA inventory failures/conflicts block preflight; staging rechecks conflicts and reads back new objects before reporting success. POSTs are never automatically retried. A corrective PUT is allowed only to the just-created application if its disabled state was not applied.
 
+Browser preview may collect strict subnet-containment overlaps for explicit review. These records include the existing resource ID, subnet pair and a digest of its known access/connector settings. Every record requires an acknowledgment for that preview; the server and worker both enforce it. The plan digest binds the records to the tenant/customer and rollout. Replanning detects changes before deployment, and staging rechecks the complete overlap set before creating ZPA resources. Direct engine execution refuses an unacknowledged review plan. CLI planning remains strict. Project/CSV fields cannot grant an exception, and reports retain the acknowledged records.
+
 ## Offline checks
 
 ```bash

@@ -191,3 +191,5 @@ td input:not([type=checkbox]),.branches-table input{font-size:14px!important;hei
 .deployment-detail{margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
 .deployment-detail>summary{font-size:13px;color:var(--muted)}
 @media(max-width:700px){.diagram-uplink{grid-template-columns:1fr}.diagram-dialog{padding:12px}.diagram-actions .button{padding:9px}.diagram-history-toolbar{align-items:stretch}.diagram-canvas{max-height:64vh}.diagram-canvas:not(.actual-size) img{max-height:min(calc(64vh - 2px),calc(94vh - 270px))}}
+
+.zpa-overlap-review{margin-top:24px;padding:20px;border:1px solid var(--notice-line);border-radius:7px;background:var(--notice);color:var(--ink)}.zpa-overlap-review h3{font-size:16px;margin:0 0 8px}.zpa-overlap-review .addressing-help{color:var(--ink);max-width:75ch;line-height:1.65;overflow-wrap:anywhere}.zpa-overlap-entry{padding:18px 0;border-bottom:1px solid var(--notice-line);overflow-wrap:anywhere}.zpa-overlap-entry strong{font-size:14px}.zpa-overlap-entry .check-label{margin-top:12px;align-items:flex-start;line-height:1.6}.zpa-overlap-entry input{flex-shrink:0;margin-top:4px}.zpa-overlap-review>p:last-child{margin-top:16px}

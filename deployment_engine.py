@@ -5,7 +5,7 @@ import time
 import ipaddress
 import re
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Tuple, Optional, Iterable, Set
 
 import requests
@@ -227,7 +227,7 @@ class DeploymentEngine:
         from template_cloning import read_rows
         return read_rows(self.template_cloner.get, '/templates/'+template_id+'/interfaces')
 
-    def plan(self, validation: ValidationResult) -> DeploymentPlan:
+    def plan(self, validation: ValidationResult, *, review_zpa_overlaps=False) -> DeploymentPlan:
         """Resolve every selected row before any deployment writes. Auth may refresh tokens."""
         plan = DeploymentPlan(issues=list(validation.issues), owner=self)
         if plan.issues or not validation.sites:
@@ -318,7 +318,11 @@ class DeploymentEngine:
                 segments = [s.zpa_segment_plan for s in plan.sites if s.zpa_segment_plan]
                 if segments:
                     inventory = zpa_segments.load_inventory(plan.zpa_context)
-                    zpa_segments.check_batch_conflicts(segments, inventory)
+                    overlaps = zpa_segments.check_batch_conflicts(segments, inventory, review_contained=review_zpa_overlaps)
+                    for prepared in plan.sites:
+                        if prepared.zpa_segment_plan:
+                            prepared.zpa_segment_plan = replace(prepared.zpa_segment_plan,
+                                overlaps=tuple(overlaps[prepared.row['site_name']]))
                     self.log(f"ZPA preflight: {len(inventory['application'])} existing application segment(s); {len(segments)} new disabled segment(s) planned. Confirm tenant entitlement before deployment.")
             except zpa_segments.SegmentConflict as exc:
                 plan.issues.append(zpa_segments.SegmentConflictIssue("configuration", 0, "ZPA preflight", str(exc)))
@@ -331,6 +335,11 @@ class DeploymentEngine:
         if plan.owner is not self:
             raise ValueError("Use the same engine to plan and execute; re-plan after changing configuration")
         result = BatchResult(issues=list(plan.issues))
+        if not dry_run and any(site.zpa_segment_plan and site.zpa_segment_plan.overlaps
+                               and not site.zpa_segment_plan.overlap_acknowledged for site in plan.sites):
+            result.issues.append(ValidationIssue('configuration', 0, 'ZPA preflight',
+                'Confirm the reviewed ZPA summary overlaps before creating resources.'))
+            return result
         for issue in plan.issues:
             self.log(f"ERR : {issue}")
         if plan.issues and not dry_run:

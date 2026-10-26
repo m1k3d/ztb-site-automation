@@ -45,6 +45,7 @@ def digest(value):
 def plan_digest(plan):
     return digest({"sites": [{"payload": site.payload, "vlans": site.vlans, "row": site.row,
                               "template_settings": site.template_settings,
+                              "zpa_overlaps": list(site.zpa_segment_plan.overlaps) if site.zpa_segment_plan else [],
                               "template_clone": {**site.template_clone.summary(), "source_digest": site.template_clone.source_digest}
                               if site.template_clone else None,
                               "ucaas": site.ucaas_plan.summary() if site.ucaas_plan else None,
@@ -64,7 +65,7 @@ def public_sites(result):
              "artifacts": deepcopy(site.artifacts),
              "diagram_warning": site.diagram.get('error', ''),
              "next_action": NEXT_ACTION.get(site.status, "Inspect this site before retrying."),
-             "segment": {key: site.zpa_segments[key] for key in ("application_name", "status", "subnets") if key in site.zpa_segments}}
+             "segment": {key: site.zpa_segments[key] for key in ("application_name", "status", "subnets", "overlaps", "overlap_acknowledged", "overlap_verification") if key in site.zpa_segments}}
             for site in result.sites]
 
 
@@ -93,7 +94,7 @@ def ignore_terminal_signals():
             signal.signal(number, signal.SIG_IGN)
 
 
-def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_id=''):
+def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_id='', overlap_confirmations=None):
     """Runs in its own process; legacy helper output is discarded, never served or logged."""
     ignore_terminal_signals()
     report_path = None
@@ -101,7 +102,7 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
     with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
         try:
             engine = DeploymentEngine(replace(config, env_path=None), emit=lambda *_: None)
-            plan = engine.plan(validate_rows(rows, source="Workspace"))
+            plan = engine.plan(validate_rows(rows, source="Workspace"), review_zpa_overlaps=True)
             if plan.issues:
                 channel.put({"done": True, "state": "blocked", "issues": public_issues(plan.issues), "sites": [],
                              "message": "Tenant checks failed. No deployment resources were created."})
@@ -110,6 +111,15 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
             if mode == "deployment" and resolved != expected_plan:
                 channel.put({"done": True, "state": "blocked", "sites": [], "message": "Tenant references changed. Preview the rollout again before deploying."})
                 return
+            overlaps = [item for site in plan.sites if site.zpa_segment_plan for item in site.zpa_segment_plan.overlaps]
+            if mode == 'deployment':
+                if not confirmations_match(overlap_confirmations, overlaps):
+                    channel.put({'done': True, 'state': 'blocked', 'sites': [],
+                                 'message': 'Confirm each reviewed ZPA summary overlap before deploying. No resources were created.'})
+                    return
+                for site in plan.sites:
+                    if site.zpa_segment_plan and site.zpa_segment_plan.overlaps:
+                        site.zpa_segment_plan = replace(site.zpa_segment_plan, overlap_acknowledged=True)
             preview = engine.execute(plan, dry_run=True)
             if preview.exit_code:
                 channel.put({"done": True, "state": "blocked", "sites": public_sites(preview),
@@ -132,6 +142,7 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
                             "segment": site.zpa_segment_plan.application_name if site.zpa_segment_plan else None}
                            for site in plan.sites]
                 channel.put({"done": True, "state": "ready", "sites": public_sites(preview), "details": details,
+                             "zpa_overlaps": overlaps,
                              "zpa_customer": plan.zpa_context.customer_id if plan.zpa_context else None,
                              "plan_digest": resolved, "message": "Tenant checks passed. Review the destination and selected sites before deploying."})
                 return
@@ -169,6 +180,14 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
                 engine.client.close()
 
 
+def confirmations_match(confirmations, overlaps):
+    if confirmations is None:
+        confirmations = []
+    return (isinstance(confirmations, list) and all(isinstance(item, str) for item in confirmations)
+            and len(confirmations) == len(set(confirmations))
+            and set(confirmations) == {item['confirmation_id'] for item in overlaps})
+
+
 class DeploymentSession:
     def __init__(self, references, report_dir):
         self.references = references
@@ -181,6 +200,7 @@ class DeploymentSession:
         self.exit_seen = None
         self.project_id = ''
         self.closing = False
+        self.overlap_confirmations = []
 
     def _drain(self):
         if self.channel is None:
@@ -228,7 +248,7 @@ class DeploymentSession:
         context = multiprocessing.get_context("spawn")
         self.exit_seen = None
         self.channel = context.Queue()
-        self.process = context.Process(target=run_worker, args=(self.rows, self.config, mode, self.resolved, str(self.report_dir), self.channel, self.project_id))
+        self.process = context.Process(target=run_worker, args=(self.rows, self.config, mode, self.resolved, str(self.report_dir), self.channel, self.project_id, self.overlap_confirmations))
         try:
             self.process.start()
         except Exception:
@@ -253,6 +273,7 @@ class DeploymentSession:
             self.rows, self.config, self.revision = deepcopy(rows), config, revision
             self.project_id = project_id
             self.resolved = None
+            self.overlap_confirmations = []
             self.job = {"id": uuid4().hex, "state": "previewing", "tenant": urlsplit(config.ztb_api_base).hostname,
                         "project_id": project_id,
                         "zpa_cloud": urlsplit(config.zpa_base_url).hostname if wants_zpa else None,
@@ -261,7 +282,7 @@ class DeploymentSession:
             self._start("preview")
             return deepcopy(self.job)
 
-    def deploy(self, job_id, rows):
+    def deploy(self, job_id, rows, overlap_confirmations=None):
         with self.lock:
             if self.closing:
                 raise ValueError("The workspace is shutting down. Restart it and preview again before deploying.")
@@ -273,6 +294,9 @@ class DeploymentSession:
             revision, _ = self.references.deployment_settings()
             if self.job["state"] != "ready" or revision != self.revision or time.time() - self.job.get("finished", 0) > 300:
                 raise ValueError("The preview expired or the connection changed. Preview again before deploying.")
+            if not confirmations_match(overlap_confirmations, self.job.get('zpa_overlaps', [])):
+                raise ValueError('Confirm each ZPA summary overlap shown in this preview before deploying.')
+            self.overlap_confirmations = list(overlap_confirmations or [])
             self.job.update(state="deploying", sites=[], issues=[], progress=None,
                             message="Rechecking tenant references before creating resources. Keep the local app running.")
             self._start("deployment")

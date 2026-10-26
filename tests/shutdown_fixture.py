@@ -24,7 +24,7 @@ def fake_plan():
     return SimpleNamespace(sites=[], issues=[], zpa_context=None)
 
 
-def controlled_worker(rows, config, mode, expected_plan, report_dir, channel, project_id=''):
+def controlled_worker(rows, config, mode, expected_plan, report_dir, channel, project_id='', overlap_confirmations=None):
     folder = Path(report_dir).parent
 
     def execute(plan, *, dry_run=False, progress=None):
@@ -48,7 +48,7 @@ def controlled_worker(rows, config, mode, expected_plan, report_dir, channel, pr
     with patch('ui_deployment.DeploymentEngine', return_value=engine), \
             patch('ui_deployment.capture_results'), patch('ui_deployment.DiagramStore'), \
             patch('requests.sessions.Session.request', side_effect=AssertionError('Unexpected network')):
-        run_worker(rows, config, mode, expected_plan, report_dir, channel, project_id)
+        run_worker(rows, config, mode, expected_plan, report_dir, channel, project_id, overlap_confirmations)
 
 
 class FixtureServer(app.LocalServer):

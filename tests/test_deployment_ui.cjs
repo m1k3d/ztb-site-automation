@@ -45,6 +45,36 @@ test('status polling leaves saved projects and unchanged result nodes alone',asy
   w.context.showView('sites');assert.equal(w.touches(),2,'real navigation still saves');
 });
 
+test('summary overlaps require each checkbox, survive polling and reset on changed preview',async()=>{
+  const w=workspace();w.context.previewSnapshot='';
+  const overlap=id=>({confirmation_id:id,site_name:'Branch',new_subnet:'10.48.1.0/24',existing_subnet:'10.48.0.0/16',application_name:'Summary',enabled:true});
+  w.context.deploymentJob={id:'preview-a',state:'ready',site_count:1,zpa_overlaps:[overlap('one'),overlap('two')]};
+  w.context.renderDeployment();
+  const host=w.get('zpa-overlap-review');
+  const inputs=()=>host.children.filter(e=>e.className==='zpa-overlap-entry').map(e=>e.children.at(-1).children[0]);
+  assert.equal(host.hidden,false);assert.equal(w.get('start-deployment').disabled,true);
+  const first=inputs()[0];first.checked=true;first.onchange();
+  assert.equal(w.get('start-deployment').disabled,true);
+  const second=inputs()[1];second.checked=true;second.onchange();
+  assert.equal(w.get('start-deployment').disabled,false);
+  await w.context.pollDeployment();
+  assert.equal(inputs()[0],first);assert.equal(first.checked,true);
+  assert.equal(w.get('start-deployment').disabled,false);
+  w.context.deploymentJob.zpa_overlaps[1]=overlap('changed');w.context.renderDeployment();
+  assert.equal(host.confirmed.size,0);assert.equal(w.get('start-deployment').disabled,true);
+  for(const input of inputs()){input.checked=true;input.onchange();}
+  w.context.deploymentJob.id='preview-b';w.context.renderDeployment();
+  assert.equal(host.confirmed.size,0);assert.equal(w.get('start-deployment').disabled,true);
+});
+
+test('rollouts without summary overlaps need no extra confirmation',()=>{
+  const w=workspace();w.context.previewSnapshot='';
+  w.context.deploymentJob={id:'preview',state:'ready',site_count:1,zpa_overlaps:[]};
+  w.context.renderDeployment();
+  assert.equal(w.get('zpa-overlap-review').hidden,true);
+  assert.equal(w.get('start-deployment').disabled,false);
+});
+
 test('configuration, nested details, and download menu stay open when progress changes',async()=>{
   const w=workspace();
   w.context.deploymentJob.sites=[{name:'Branch',status:'partial',stages:{Site:true},

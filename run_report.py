@@ -118,6 +118,13 @@ def save_report(path, result, *, dry_run=False, workspace=None):
         if site.get('zpa_segments'):
             staged = site['zpa_segments']
             lines.append(f"ZPA LAN: {staged['application_name']} — {staged['status']}; {len(staged['subnets'])} subnet(s); requested disabled, ICMP off.")
+            for overlap in staged.get('overlaps', []):
+                state = 'acknowledged' if staged.get('overlap_acknowledged') else 'not acknowledged'
+                lines.append(f"ZPA summary overlap {state}: {overlap['new_subnet']} is within "
+                             f"{overlap['application_name']} ({overlap['existing_subnet']}); existing segment ID: "
+                             f"{overlap['application_id']}; confirmation: {overlap['confirmation_id']}.")
+            if staged.get('overlap_verification') == 'changed':
+                lines.append('ZPA summary coverage changed after confirmation. No ZPA segment resources were created; inspect before recovery.')
         if site.get('ucaas'):
             breakout = site['ucaas']
             lines.append(f"UCaaS local breakout: {breakout['status']}; primary {breakout['primary']}, secondary {breakout['secondary']}; Best; {len(breakout.get('rules', []))} port-specific rules; IPv4 address objects only.")

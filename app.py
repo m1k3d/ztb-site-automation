@@ -392,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path.endswith('/start') and pid != self.server.deployment.project_id:
                     raise ValueError('The rollout project changed. Preview again before deploying.')
                 result = (self.server.deployment.preview(rows, pid) if self.path.endswith("preview") else
-                          self.server.deployment.deploy(payload.get("preview_id"), rows))
+                          self.server.deployment.deploy(payload.get("preview_id"), rows, payload.get('zpa_overlap_confirmations')))
             elif self.path == '/api/rollout/check':
                 batch = payload.get('batch')
                 normalize_batch(batch)
