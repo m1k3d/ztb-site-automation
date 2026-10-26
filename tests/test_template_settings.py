@@ -19,6 +19,8 @@ class TemplateSettingsTests(unittest.TestCase):
         self.template=dict(id='template',name='Reference',platform_type='zt800',deployment_type='standalone',dhcp_service='server')
         self.e.get_json=Mock(side_effect=lambda *a,**k:deepcopy(self.template))
         self.e.post_json=Mock();self.e.create_site=Mock()
+        self.e.get_ha_template_interfaces=Mock(return_value=[dict(gateway_id=slot,name=name,interface_type=role)
+            for slot in ('Gateway-1','Gateway-2') for name,role in (('ge7','wan'),('ge4','ha'),('ge5','ha-data'))])
 
     def tearDown(self):
         self.http.assert_not_called()

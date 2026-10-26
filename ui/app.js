@@ -162,6 +162,8 @@ function renderUcaas() {
   if(!enabled)return;
   const selected=ucaasSelected(site), primary=site.fields.wan_interface_name || '';
   document.querySelectorAll('[data-ucaas-service]').forEach(input=>input.checked=selected.includes(input.dataset.ucaasService));
+  $('ucaas-primary-label').textContent=site.ha_enabled ? 'Gateway A primary WAN' : 'Primary WAN';
+  $('ucaas-secondary-label').textContent=site.ha_enabled ? 'Gateway A secondary WAN' : 'Secondary WAN';
   $('ucaas-primary').textContent=primary || 'Choose the site WAN above';
   const state=interfaceState(site,'wan'), alternatives=state.options.filter(o=>o.value!==primary);
   const secondary=document.querySelector('[data-field="ucaas_secondary_wan"]'), value=site.fields.ucaas_secondary_wan || '';
@@ -169,6 +171,16 @@ function renderUcaas() {
   alternatives.forEach(o=>secondary.add(new Option(o.label,o.value)));
   if(value && !alternatives.some(o=>o.value===value))secondary.add(new Option(`${value} · verify during preview`,value));
   secondary.value=value;
+  $('ucaas-peer-wans').hidden=!site.ha_enabled;
+  if(site.ha_enabled){
+    const primaryB=site.fields.wan1_interface_name || '', peer=interfaceState(site,'wan',1);
+    $('ucaas-primary-b').textContent=primaryB || 'Choose Gateway B WAN above';
+    const options=peer.options.filter(o=>o.value!==primaryB), field=document.querySelector('[data-field="ucaas_secondary_wan_b"]'), selectedB=site.fields.ucaas_secondary_wan_b || '';
+    field.replaceChildren(new Option(options.length===1 ? `Automatic · ${options[0].value}` : 'Automatic · use the other WAN',''));
+    options.forEach(o=>field.add(new Option(o.label,o.value)));
+    if(selectedB && !options.some(o=>o.value===selectedB))field.add(new Option(`${selectedB} · verify during preview`,selectedB));
+    field.value=selectedB;
+  }
   const path=site.fields.ucaas_path_selection || 'best';
   const pathLabels={best:'Best',none:'None',balanced:'Balanced'};
   document.querySelector('[data-field="ucaas_path_selection"]').value=path;
@@ -177,7 +189,7 @@ function renderUcaas() {
     none:'Uses the primary WAN. Switches to the secondary if the primary goes down.',
     balanced:'Balances traffic across the primary and secondary WANs.'
   }[path] || 'Choose Best, None or Balanced.';
-  $('ucaas-wan-help').textContent=site.ha_enabled ? 'HA local breakout must be verified before it can be deployed.' :
+  $('ucaas-wan-help').textContent=site.ha_enabled ? 'Two UCaaS rules are configured and verified on each gateway using its own primary and secondary WANs. Select a secondary WAN for each peer if more than one alternative is available. This does not route through the peer’s WAN.' :
     !state.verified ? 'Connect and load the site template to identify the other WAN. Tenant preview verifies both interfaces.' :
     !primary || !state.options.some(o=>o.value===primary) ? 'Choose a valid primary WAN above.' :
     !alternatives.length ? 'UCaaS local breakout needs two distinct WAN interfaces.' :
@@ -280,6 +292,7 @@ function renderWanModes() {
   site.ha_enabled ??= Boolean(site.fields.gateway_name_b || site.fields.wan1_interface_name);
   $("gateway-setup").value=site.ha_enabled ? 'ha' : 'standalone';
   $("gateway-b-panel").hidden=!site.ha_enabled;
+  $("ha-deployment-note").hidden=!site.ha_enabled;
   $("gateway-a-label").textContent=site.ha_enabled ? 'Gateway A' : 'Gateway';
   site.wan_modes ||= {};
   for(const index of ['0','1']) {
@@ -834,6 +847,12 @@ function renderDeploymentResults(active) {
     if(detail) {
       row.append(node('p',detail.template_clone ? `First create template “${detail.template_clone.name}” from “${detail.template_clone.source_name}”, then deploy this site using the new template.` : `Use existing template “${detail.template}”.`,'addressing-help'));
       row.append(node('p',`${detail.vlans} VLANs · App Connector: ${detail.app_connector ? 'create' : 'not requested'}${detail.segment ? ' · Disabled ZPA segment: '+detail.segment : ''}`,'addressing-help'));
+      if(detail.ha){
+        row.append(node('h4',detail.ha.mode==='wan_edge_mode_ha'?'Enhanced HA':'Standard HA'));
+        detail.ha.gateways.forEach((g,i)=>row.append(node('p',`Gateway ${i?'B':'A'}: ${g.name} · WAN ${g.wan} · ${g.address}`,'addressing-help')));
+        for(const n of detail.ha.management)row.append(node('p',`${n.name} · Gateway ${n.target?.toUpperCase()} · ${n.interface}`,'addressing-help'));
+        if(detail.ha.management.some(n=>n.interface==='lo0'))row.append(node('p','lo0 bindings may remain unverified until appliance activation. An accepted network with an unverified binding is reported as incomplete; inspect it before recovery.','deployment-warning'));
+      }
     }
     if(site.template?.id)row.append(node('p',`Created template: ${site.template.name} · ID: ${site.template.id}`,'addressing-help'));
     if(site.segment?.subnets?.length)row.append(node('p',`ZPA segment destinations: ${site.segment.subnets.join(', ')}`,'addressing-help'));
@@ -853,7 +872,8 @@ function renderDeploymentResults(active) {
     }
     const breakout=site.ucaas?.objects?.length ? site.ucaas : detail?.ucaas || site.ucaas;
     if(breakout?.primary) {
-      row.append(node('p',`UCaaS local breakout · Primary ${breakout.primary} · Secondary ${breakout.secondary} · ${breakout.path_selection || 'Best'} · ${breakout.rules?.length || 0} rules · IPv4 address objects only`,'addressing-help'));
+      row.append(node('p',`UCaaS local breakout · ${breakout.gateways?.length ? 'Both HA gateways' : `Primary ${breakout.primary} · Secondary ${breakout.secondary}`} · ${breakout.path_selection || 'Best'} · ${breakout.rules?.length || 0} rules${breakout.gateways?.length ? ' per gateway' : ''} · IPv4 address objects only`,'addressing-help'));
+      for(const peer of breakout.gateways || [])row.append(node('p',`Gateway ${peer.target.toUpperCase()} · ${peer.name} · Primary ${peer.primary} · Secondary ${peer.secondary} · ${peer.status || 'planned'} · 2 local breakout rules`,'addressing-help'));
       row.append(node('p',breakout.rule_layout==='web_media' ? 'Two shared rules combine web ports across selected destinations and media ports across media destinations. All selected vendor ports are retained. Both rules bypass ZIA and sit above template forwarding rules.' : 'Selected destination and port combinations go directly to the internet, bypassing ZIA. Site rules are placed above template forwarding rules.','addressing-help'));
       const rules=node('ul',undefined,'ucaas-rule-review');
       const plannedObjects=new Map((breakout.objects || []).map(object=>[object.key,object]));

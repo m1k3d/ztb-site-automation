@@ -2,7 +2,7 @@
 
 Prepare and deploy new Zscaler Zero Trust Branch sites from a local browser workspace. Start from a working site or a CSV template, build your branch rollout, and review the changes before deploying.
 
-Maintained by [Mike Dechow](https://github.com/m1k3d). Standalone deployment is available in the UI. HA configurations can be prepared and exported, but HA deployment from the UI is not enabled yet.
+Maintained by [Mike Dechow](https://github.com/m1k3d). Standalone and HA staging are available in the UI. HA preview checks both gateway assignments before creation; appliance activation and failover still require verification.
 
 [Start with Docker](#docker-quick-start) · [Use the workspace](#your-first-rollout) · [Import CSVs](#importing-sites-and-vlans) · [Save your work](#saving-and-returning-later) · [Troubleshooting](#troubleshooting)
 
@@ -147,7 +147,7 @@ Coordinate work with other operators: separate app instances and CLI processes d
 
 ## Current limits
 
-- HA deployment from the browser is blocked while WAN and management mapping are being verified.
+- HA preview validates both template gateways, WANs, HA links and network assignments. Unverified `lo0` management binding leaves the rollout incomplete until checked after activation.
 - A project supports up to 500 sites and 10,000 VLANs. Deployment checks read a paginated inventory of up to 10,000 tenant sites; an incomplete or inconsistent result blocks creation. The reference-site picker currently lists the first 100 sites.
 - IPv6 configuration is not supported.
 - Management `lo0` binding on pending appliances and live traffic behavior need separate verification after activation.

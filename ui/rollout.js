@@ -56,7 +56,7 @@ const ZtbRollout = {install(ctx) {
       const config=el('td',undefined,'rollout-config');config.append(el('span',f.template_mode==='clone'?`New: ${f.new_template_name || f.site_name}`:f.template_name || f.template_id || 'Template not set'),el('small',`${check?.ha?'HA · ':''}WAN · ${site.wan_modes?.['0']==='static' || f.wan0_ip?'Static IP':'DHCP'}`));
       const readiness=el('td');
       if(check?.issues.length){const b=button(`${check.issues.length} ${check.issues.length===1?'issue':'issues'} to resolve`,()=>ctx.edit(i),'readiness-warning');b.title=check.issues.map(x=>`${x.field}: ${x.message}`).join('\n');readiness.append(b);}
-      else readiness.append(el('span',check?(check.ha?'Ready · CSV only':'✓ Ready'):'Checking…','readiness-label'));
+      else readiness.append(el('span',check?(check.ha?'Ready · HA':'✓ Ready'):'Checking…','readiness-label'));
       const deployment=el('td');const labels={success:'✓ Completed',already_exists:'Existing site',partial:'Incomplete',template_only:'Template created',failed:'Inspect result',template_failed:'Template failed',lookup_failed:'Check blocked'};
       deployment.append(el('span',labels[result?.status] || 'No recorded result',result?.status==='success'?'result-complete':'result-label'));
       if(result){const detail=el('details');detail.append(el('summary','Details'),el('p',result.next_action || 'Inspect the report before retrying.'));deployment.append(detail);}

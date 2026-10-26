@@ -156,6 +156,8 @@ def validate_vlan_rows(rows, source, issues, *, ha=False):
         if target == 'b' and not ha:
             check.error('gateway_target', 'Gateway B requires a high-availability site')
         management = v['zone'].lower() == 'management zone' or 'lo0' in interface.lower().split(',')
+        if ha and management and target == 'all':
+            check.error('gateway_target', 'Choose Gateway A or Gateway B for each HA management network')
         if ha and target in ('a','b') and not management:
             check.error('gateway_target', 'Regular HA LAN VLANs apply to both gateways; use all. Configure extra WANs under Additional WANs.')
         ports = [p.strip().lower() for p in interface.split(',')]
@@ -310,10 +312,10 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
             check.check("ucaas_services", lambda: selected_services(row))
             if row["ucaas_path_selection"] not in PATH_SELECTIONS:
                 check.error("ucaas_path_selection", MESSAGES["ucaas_path_selection"])
-            if row.get("gateway_name_b"):
-                check.error("ucaas_local_breakout", "UCaaS local breakout currently supports standalone gateways; HA must be verified first")
             if row.get("ucaas_secondary_wan") == row.get("wan_interface_name"):
                 check.error("ucaas_secondary_wan", "must differ from the primary WAN interface")
+            if row.get('gateway_name_b') and row.get('ucaas_secondary_wan_b') and row['ucaas_secondary_wan_b']==row.get('wan1_interface_name'):
+                check.error('ucaas_secondary_wan_b', 'must differ from Gateway B primary WAN interface')
         if row["template_mode"] not in ("existing", "clone"):
             check.error("template_mode", "choose existing or clone")
         if row["template_mode"] == "clone":

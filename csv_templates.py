@@ -105,17 +105,17 @@ MORE ADVANCED SETTINGS
 This kit keeps optional features off. After import, use the editor for template
 cloning, ZIA locations, ZPA, additional WANs, private-domain DNS and UCaaS.
 Review > Download CSV bundle exports your configured fields for later reuse.
-HA configuration can be exported as CSV, but UI HA deployment remains gated.
+HA staging is available after tenant preview verifies both gateway mappings.
 Never put API keys, passwords, or other credentials in these files.
 """
 
 
 HA_GUIDE = """ZERO TRUST BRANCH — HA CSV STARTER KIT
-Preparation and CSV export only
+Prepare, preview, then deploy
 
-HA deployment from the browser is not enabled yet: reference WAN and management
-mapping still need verification. Importing this kit does not deploy anything
-or enable HA deployment. No credentials or tenant connection are needed.
+Importing this kit does not deploy anything. Editing and CSV export need no
+tenant connection. Deployment requires a connected tenant and a successful
+preview of the HA template, both WANs and management assignments.
 
 1. EXTRACT AND EDIT
 Extract the ZIP. sites.csv contains ONE branch with TWO gateways, not two sites.
@@ -138,10 +138,13 @@ The example starts unselected (post=0). Open it in the editor and review the
 HA setup, both WANs, HA link, and VLAN gateway assignments. Template and zone
 names are placeholders; offline validation does not verify tenant resources.
 
-3. EXPORT YOUR PREPARED CONFIGURATION
-Select the branch when ready to review, then use Review > Download CSV bundle.
-You can save the project locally and return to it later. The browser's HA
-deployment gate remains in place; a valid CSV is not approval to deploy HA.
+3. REVIEW AND DEPLOY
+Select the branch when ready, connect your tenant and run deployment preview.
+Review both gateways, WAN addressing and management assignments before Deploy.
+You can also save the project or use Review > Download CSV bundle.
+Pending appliances may accept lo0 records without binding them. This leaves
+an incomplete Loopback binding stage: inspect after activation, do not clone
+or create the same site again.
 
 SITES.CSV COLUMN GUIDE
 site_name           One unique branch name for the HA pair.
@@ -165,7 +168,7 @@ vrrp_vrid           VRRP ID from 1 to 255; 1 is an example, not a tenant lookup.
 location_type       none = no ZIA location configured in this example.
 vlans_file          Matching VLAN filename, here vlans/ha-branch-01.csv.
 post                0 = unselected, 1 = included for review/export. Keep 0 while
-                    editing. Setting 1 does not bypass the HA deployment gate.
+                    editing. Tenant preview and confirmation are still required.
 appc_provision      0 = App Connector provisioning off in this kit.
 
 VLAN CSV COLUMN GUIDE

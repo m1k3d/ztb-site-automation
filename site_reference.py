@@ -14,7 +14,7 @@ from connection_file import parse_connection_file
 from zpa_provisioning import prepare_zpa
 from additional_wans import from_reference
 import json
-from pull_site import (is_ha_internal_vlan, is_wan_vlan, parse_private_dns_members,
+from pull_site import (is_ha_internal_vlan, is_wan_vlan, parse_private_dns_members, ordered_reference_gateways,
                        site_to_csv_row, vlans_to_csv_rows)
 
 
@@ -305,6 +305,8 @@ class ReferenceSites:
                 "group_name": "System-Private-DNS-Servers-Group", "refresh_token": "enabled"}, "private DNS", version=2)
             try:
                 private_dns = parse_private_dns_members(dns_data, site_id)
+                row = deepcopy(row)
+                row['gateways'] = ordered_reference_gateways(row.get('gateways') or (row.get('cluster_info') or {}).get('gateways') or [], strict=True)
                 fields = site_to_csv_row(row, name, private_dns, wan_networks=vlans)
                 gateways = row.get("gateways") or (row.get("cluster_info") or {}).get("gateways") or []
                 extras = from_reference([v for v in vlans if is_wan_vlan(v)], gateways, fields)

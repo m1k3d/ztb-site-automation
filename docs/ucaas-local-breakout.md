@@ -4,9 +4,9 @@ Enable **UCaaS local breakout** on a new branch to send selected collaboration
 destinations directly through its WAN interfaces, bypassing ZIA. It is off by
 default. Teams, Zoom Meetings and Webex are selected when first enabled; Google
 Meet is optional. Branch copies retain the choice. Saved projects and CSV export
-retain the flag, service selection, secondary WAN override and path selection.
+retain the flag, service selection, per-gateway secondary WAN overrides and path selection.
 
-The deployment preview lists two shared rules, their combined destination/protocol/port sets, and whether each
+The deployment preview lists two rules per gateway, their combined destination/protocol/port sets, and whether each
 reusable destination or Port object will be created or reused. IP address objects contain **IPv4 only**. Domain objects are
 separate; this does not claim to configure IPv6 routing. This feature is forwarding
 configuration, not a complete firewall allowlist or a replacement for vendor
@@ -21,7 +21,9 @@ connectivity requirements.
    it becomes secondary. With more WANs, choose a secondary explicitly. Two
    distinct WANs are required. **Path selection** defaults to **Best**. Choose
    **None** for primary/secondary failover, or **Balanced** to distribute traffic
-   across both WANs. HA remains blocked pending separate verification.
+   across both WANs. For HA, each peer must have two distinct local WANs.
+   Gateway A and B have separate secondary selections; automatic selection only
+   works when that peer has exactly one alternative WAN.
 3. Any requested template clone is created first, followed by the new site.
 4. After gateway discovery, the deployed gateway's WAN roles are checked. Missing
    destination and Port objects are created with stable, content-versioned names. Objects
@@ -49,6 +51,13 @@ An incomplete stage leaves a partial deployment and a recovery message; inspect
 the named resources before recovery. Do not repeat site creation. No resources
 are automatically deleted on failure.
 
+For standard and enhanced HA, both peers are resolved by their requested gateway
+names, then checked before any objects or policies are created. Each peer gets
+its own Web and Media rules and policy-order verification. Destination and Port
+objects are shared. Rules use local WAN egress (`wan_edge_ha=false`); they do not
+configure cross-peer WAN transit. If one peer fails, the report retains the
+other peer’s result and the overall deployment stays incomplete.
+
 ## Destination and Port objects
 
 Names identify the provider or shared purpose, for example
@@ -68,7 +77,7 @@ objects remain available and are not deleted or changed.
 For Teams, Zoom and Webex, Web uses TCP 80/443 and UDP 443. Media uses TCP
 5004/8801–8802 and UDP 3478–3481/5004/8801–8810/9000. Selecting Google Meet adds
 UDP 19302–19309 to Media. Selecting only one provider includes only that
-provider’s published ports. All selections still produce two rules.
+provider’s published ports. All selections produce two rules per gateway (four for HA).
 
 ## Path selection
 
@@ -116,7 +125,8 @@ It does not authenticate to or write to a ZTB tenant.
 | --- | --- |
 | `ucaas_local_breakout` | `0` (default) or `1` |
 | `ucaas_services` | Comma-separated `teams,zoom,webex,meet`; default `teams,zoom,webex` if omitted. Empty is invalid while enabled. |
-| `ucaas_secondary_wan` | Optional exact WAN name; omitted means infer the unique other WAN. |
+| `ucaas_secondary_wan` | Optional exact WAN name for standalone / Gateway A; omitted means infer the unique other WAN. |
+| `ucaas_secondary_wan_b` | HA Gateway B secondary WAN; omitted means infer its unique other WAN. |
 | `ucaas_path_selection` | `best` (default), `none`, or `balanced`. |
 
 ## Verification status
@@ -131,3 +141,8 @@ deployed in the live tenant. Tests also cover all 15 service selections, retenti
 destination/port pairing, exact combined port sets, object reuse, WAN inference,
 ordering and uncertain writes. Gateway activation, call-quality and WAN failover
 tests remain necessary to validate appliance behavior.
+
+HA tests cover both template modes, all three path selections, reversed gateway
+inventory order, per-peer WAN selection, shared object reuse and failures on
+either peer. These are offline API tests. Live HA rule acceptance, call quality
+and failover still need to be verified on activated appliances.

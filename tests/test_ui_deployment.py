@@ -72,11 +72,16 @@ class SessionTests(unittest.TestCase):
             self.session.connection_action(Mock(side_effect=RuntimeError("failed")))
         self.assertEqual(self.session.status()["state"], "expired")
 
-    def test_invalid_input_and_ha_block_before_worker_start(self):
-        for batch in ([], [{**rows()[0], "gateway_name": ""}],
-                      [{**rows()[0], "gateway_name_b": "B", "wan1_interface_name": "ge5"}]):
+    def test_invalid_input_blocks_before_worker_start(self):
+        for batch in ([], [{**rows()[0], "gateway_name": ""}]):
             with self.assertRaises(ValueError):self.session.preview(batch)
         self.start.assert_not_called()
+
+    def test_ha_starts_preview_worker_and_still_requires_preview_approval(self):
+        batch=[{**rows()[0], 'gateway_name_b':'B', 'wan1_interface_name':'ge5'}]
+        job=self.session.preview(batch)
+        self.assertEqual(job['state'],'previewing');self.start.assert_called_once_with('preview')
+        with self.assertRaises(ValueError):self.session.deploy(job['id'],batch)
 
     def test_shutdown_prevents_late_requests_from_starting_a_new_worker(self):
         identifier = self.ready()

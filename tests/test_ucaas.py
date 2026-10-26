@@ -66,12 +66,16 @@ class BreakoutTests(unittest.TestCase):
         if path == "/templates/template-id/interfaces":
             return deepcopy(dict(count=len(self.ports), result=self.ports))
         if path == "/pbr/interfaces":
-            return dict(gateway_id=params["gateway_id"], interfaces=[dict(interface_name=p["name"], interface_type=p["interface_type"]) for p in self.ports])
+            slot = 'Gateway-2' if params['gateway_id'] == 'gw-b' else 'Gateway-1'
+            return dict(gateway_id=params["gateway_id"], interfaces=[dict(interface_name=p["name"], interface_type=p["interface_type"])
+                for p in self.ports if p['gateway_id']==slot])
         if path == "/pbr/policies":
-            return deepcopy(dict(policies=self.policy_rows))
+            return deepcopy(dict(policies=self.policy_rows if params['gateway_id']=='gw-new' else
+                [p for p in self.policy_rows if p['gateway_id']==params['gateway_id']]))
         if path == "/pbr/rules":
-            local = sorted([p for p in self.policy_rows if not p["template_id"]], key=lambda p: p["sequence_number"])
-            inherited = [p for p in self.policy_rows if p["template_id"]]
+            rows = [p for p in self.policy_rows if p['gateway_id']==params['gateway_id']]
+            local = sorted([p for p in rows if not p["template_id"]], key=lambda p: p["sequence_number"])
+            inherited = [p for p in rows if p["template_id"]]
             rules = inherited + local if self.rules_wrong_order else local + inherited
             return {"pbr_rules": deepcopy(rules)}
         raise AssertionError((url, params))
@@ -300,9 +304,9 @@ class BreakoutTests(unittest.TestCase):
         self.groups.append(dict(group_id=400, type="domains", owner="user", name="Exact", member_attributes={"fqdn": next(s for s in self.catalog["services"] if s["id"] == "zoom")["domains"]}))
         self.assertNotEqual(first, plan_digest(self.plan()))
 
-    def test_bad_selection_and_ha_are_rejected_offline(self):
+    def test_bad_selection_is_rejected_offline(self):
         for override in ({"ucaas_services": ""}, {"ucaas_services": "unknown"}, {"ucaas_secondary_wan": "ge5"},
-                         {"gateway_name_b": "peer", "wan1_interface_name": "ge5"}, {"ucaas_local_breakout": "true"}):
+                         {"gateway_name_b": "peer", "wan1_interface_name": "ge5", "ucaas_secondary_wan_b":"ge5"}, {"ucaas_local_breakout": "true"}):
             with self.subTest(override=override):
                 self.assertTrue(validate_rows([row(**override)]).issues)
 

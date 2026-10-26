@@ -128,6 +128,8 @@ def normalize_batch(batch, branding=DEFAULT_BRANDING):
         if item.get("ha_enabled") is False:
             for field in ("gateway_name_b", "wan1_interface_name", "wan1_ip", "wan1_mask", "wan1_gw", "vrrp_link_interface"):
                 row[field] = ""
+        if row.get('gateway_name_b') and 'interface_gateways' in item:
+            row['ha_template_slots_json'] = json.dumps(item['interface_gateways'])
         modes = item.get("wan_modes", {})
         if not isinstance(modes, dict) or any(key not in ("0", "1") or mode not in ("dhcp", "static") for key, mode in modes.items()):
             raise ValueError("WAN addressing must be DHCP or Static IP")

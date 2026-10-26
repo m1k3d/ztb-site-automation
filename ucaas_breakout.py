@@ -5,7 +5,7 @@ WAN next-hop overrides are optional in the portal: empty values use the WAN's
 configured routing. Never copy a reference site's static next hop to a branch.
 """
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import ipaddress
 import time
 from urllib.parse import quote
@@ -23,7 +23,7 @@ class BreakoutError(ValueError):
 MESSAGES = {
     "ucaas_path_selection": "Choose Best, None or Balanced for UCaaS path selection.",
     "ucaas_catalog": "Refresh UCaaS destinations, then preview again. The catalog is missing, invalid or more than 30 days old.",
-    "ucaas_interfaces": "UCaaS local breakout needs two distinct WAN interfaces on a standalone gateway. Check the primary WAN and select a secondary WAN if the template has more than two.",
+    "ucaas_interfaces": "UCaaS local breakout needs two distinct local WAN interfaces on each gateway. Check each primary WAN and select its secondary WAN when more than one alternative exists.",
     "ucaas_inventory": "Cannot verify the SaaS catalog, destination/Port objects or site-network source object. Check tenant read permissions and preview again.",
     "ucaas_changed": "A reviewed object or WAN assignment changed. Preview again before deployment. Inspect any site already created.",
     "ucaas_object_unconfirmed": "Destination or Port object creation or verification is incomplete. Inspect the object names in the report before recovery; creation will not be retried automatically.",
@@ -132,9 +132,10 @@ class BreakoutPlan:
     catalog_date: str
     rules: list
     path_selection: str = "best"
+    gateways: list = field(default_factory=list)
 
     def summary(self):
-        return dict(primary=self.primary, secondary=self.secondary,
+        return dict(primary=self.primary, secondary=self.secondary, gateways=deepcopy(self.gateways),
                     path_selection=PATH_SELECTIONS[self.path_selection]["label"], ipv4_only=True,
                     source_id=self.source_id, catalog_date=self.catalog_date,
                     services=deepcopy(self.services), objects=deepcopy(self.objects), rules=deepcopy(self.rules),
@@ -190,12 +191,15 @@ class LocalBreakout:
     def wan_ports(self, template_id):
         rows = read_rows(lambda path, params: self.get(3, path, params),
                          "/templates/" + quote(template_id, safe="") + "/interfaces")
-        if {row.get("gateway_id") for row in rows} != {"Gateway-1"}:
+        slots = {row.get('gateway_id') for row in rows}
+        if slots not in ({'Gateway-1'}, {'Gateway-1','Gateway-2'}):
             raise BreakoutError("ucaas_interfaces")
-        ports = [row["name"] for row in rows if row.get("interface_type") == "wan" and not row.get("bonding_parent")]
-        if len(set(ports)) != len(ports):
-            raise BreakoutError("ucaas_interfaces")
-        return sorted(ports)
+        result = {}
+        for slot in slots:
+            ports = [row['name'] for row in rows if row.get('gateway_id') == slot and row.get('interface_type') == 'wan' and not row.get('bonding_parent')]
+            if len(set(ports)) != len(ports):raise BreakoutError('ucaas_interfaces')
+            result[slot] = sorted(ports)
+        return result
 
     @staticmethod
     def source(inventory):
@@ -209,8 +213,6 @@ class LocalBreakout:
         if row.get("ucaas_local_breakout") != "1":
             return None
         path_selection = selected_path(row)
-        if row.get("gateway_name_b"):
-            raise BreakoutError("ucaas_interfaces")
         try:
             if self._catalog is None:
                 self._catalog = load_catalog(fresh=True)
@@ -219,12 +221,17 @@ class LocalBreakout:
         try:
             if template_id not in self._wan_ports:
                 self._wan_ports[template_id] = self.wan_ports(template_id)
-            ports = self._wan_ports[template_id]
-            primary = row.get("wan_interface_name", "")
-            alternatives = [v for v in ports if v != primary]
-            secondary = row.get("ucaas_secondary_wan") or (alternatives[0] if len(alternatives) == 1 else "")
-            if primary not in ports or secondary not in alternatives:
-                raise BreakoutError("ucaas_interfaces")
+            mappings = []
+            slots = ('Gateway-1','Gateway-2') if row.get('gateway_name_b') else ('Gateway-1',)
+            if set(self._wan_ports[template_id]) != set(slots):raise BreakoutError('ucaas_interfaces')
+            for i,slot in enumerate(slots):
+                ports = self._wan_ports[template_id][slot]
+                primary = row.get('wan1_interface_name' if i else 'wan_interface_name', '')
+                alternatives = [v for v in ports if v != primary]
+                secondary = row.get('ucaas_secondary_wan_b' if i else 'ucaas_secondary_wan') or (alternatives[0] if len(alternatives) == 1 else '')
+                if primary not in ports or secondary not in alternatives:raise BreakoutError('ucaas_interfaces')
+                mappings.append(dict(target='b' if i else 'a', name=row.get('gateway_name_b' if i else 'gateway_name'), primary=primary, secondary=secondary))
+            primary, secondary = mappings[0]['primary'], mappings[0]['secondary']
             if self._inventory is None:
                 self._inventory, self._apps = self.inventory(), self.apps()
             source = self.source(self._inventory)
@@ -272,7 +279,8 @@ class LocalBreakout:
                 port_key = add_object("l4port", ports, f"UCaaS-{category}-Ports", "ucaas")
                 rules.append(dict(key=category.lower(), service="ucaas", name=f"UCaaS {category} Breakout",
                                   destination_keys=sorted(destinations), ports=ports, port_key=port_key))
-            return BreakoutPlan(primary, secondary, source, services, objects, self._catalog["retrieved_at"], rules, path_selection)
+            return BreakoutPlan(primary, secondary, source, services, objects, self._catalog["retrieved_at"], rules, path_selection,
+                                mappings if len(mappings)==2 else [])
         except BreakoutError:
             raise
         except Exception:
@@ -366,7 +374,51 @@ class LocalBreakout:
             raise BreakoutError("ucaas_changed")
         return identifiers
 
-    def apply(self, plan, gateway_ids, site_name, report):
+    def apply(self, plan, gateway_ids, site_name, report, *, row=None, site_id=None):
+        if not plan.gateways:
+            return self._apply_gateway(plan, gateway_ids, site_name, report)
+        report.update(plan.summary(), status='incomplete', objects=[], policies=[])
+        if not row or not site_id or len(plan.gateways)!=2:raise BreakoutError('ucaas_changed')
+        targets = [{'gateway_target': target} for target in ('a','b')]
+        try:
+            resolved = self.engine.vlan_gateway_targets(site_id, gateway_ids, targets, row)
+            assignments = []
+            # Validate both peers before creating shared objects or any forwarding rule.
+            for mapping, target in zip(plan.gateways,targets):
+                expected = row.get('gateway_name_b' if mapping['target']=='b' else 'gateway_name')
+                if mapping['target']!=target['gateway_target'] or mapping['name']!=expected:raise BreakoutError('ucaas_changed')
+                gateway = resolved[id(target)]
+                peer_plan = replace(plan, primary=mapping['primary'], secondary=mapping['secondary'], gateways=[])
+                self.check_gateway(peer_plan,gateway)
+                assignments.append((mapping,gateway,peer_plan))
+            identifiers = self.ensure_objects(plan,report)
+            report['gateways'] = [{**mapping, 'gateway_id':gateway, 'status':'pending'}
+                                  for mapping,gateway,_ in assignments]
+            for (_,gateway,peer_plan),peer in zip(assignments,report['gateways']):
+                try:
+                    self._apply_gateway(peer_plan,gateway,site_name,peer,identifiers=identifiers)
+                finally:
+                    report['policies'].extend([{**p,'gateway_id':gateway,'gateway_target':peer['target']}
+                                               for p in peer.get('policies',[])])
+            report.update(status='configured',priority='Above site and template rules on both gateways')
+            return True
+        except BreakoutError:
+            raise
+        except Exception:
+            raise BreakoutError('ucaas_changed') from None
+
+    def check_gateway(self, plan, gateway):
+        interfaces = self.get(3, '/pbr/interfaces', {'gateway_id':gateway})
+        if interfaces.get('gateway_id') != gateway:raise BreakoutError('ucaas_changed')
+        wan = [r['interface_name'] for r in interfaces['interfaces'] if r.get('interface_type')=='wan']
+        if plan.primary==plan.secondary or any(wan.count(v)!=1 for v in (plan.primary,plan.secondary)):
+            raise BreakoutError('ucaas_changed')
+        before = self.policies(gateway)
+        if not plan.rules or any(p.get('name','').startswith('ucaas-lbo-') or p.get('display_name','').startswith('UCaaS ') for p in before):
+            raise BreakoutError('ucaas_changed')
+        return before
+
+    def _apply_gateway(self, plan, gateway_ids, site_name, report, *, identifiers=None):
         report.update(primary=plan.primary, secondary=plan.secondary,
                       path_selection=PATH_SELECTIONS[plan.path_selection]["label"], ipv4_only=True,
                       rule_layout="web_media",
@@ -379,18 +431,9 @@ class LocalBreakout:
         report["gateway_id"] = gateway
         phase = "ucaas_changed"
         try:
-            interfaces = self.get(3, "/pbr/interfaces", {"gateway_id": gateway})
-            if interfaces.get("gateway_id") != gateway:
-                raise BreakoutError("ucaas_changed")
-            wan = [r["interface_name"] for r in interfaces["interfaces"] if r.get("interface_type") == "wan"]
-            if plan.primary == plan.secondary or any(wan.count(v) != 1 for v in (plan.primary, plan.secondary)):
-                raise BreakoutError("ucaas_changed")
-            before = self.policies(gateway)
-            if not plan.rules or any(p.get("name", "").startswith("ucaas-lbo-") or
-                                     p.get("display_name", "").startswith("UCaaS ") for p in before):
-                raise BreakoutError("ucaas_changed")
+            before = self.check_gateway(plan,gateway)
             phase = "ucaas_object_unconfirmed"
-            identifiers = self.ensure_objects(plan, report)
+            if identifiers is None:identifiers = self.ensure_objects(plan, report)
             # All destinations and Ports must exist before the first rule.
             inventory, apps = self.inventory(), self.apps()
             for obj in plan.objects:

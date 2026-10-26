@@ -19,6 +19,7 @@ from input_validation import validate_rows
 from run_report import reserve_report, save_report, public_diagnostics
 from ucaas_breakout import MESSAGES as UCAAS_MESSAGES
 from dns_policy import MESSAGES as DNS_MESSAGES
+from ha_deployment import MESSAGES as HA_MESSAGES
 from zpa_segments import SegmentConflictIssue
 from site_diagrams import capture_results
 from diagram_store import DiagramStore
@@ -70,7 +71,7 @@ def public_sites(result):
 def public_issues(issues):
     # Exception strings can contain raw HTTP bodies. Expose a useful, fixed action per field.
     from site_payload import TEMPLATE_MESSAGES
-    messages = {**TEMPLATE_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
+    messages = {**TEMPLATE_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, **HA_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
                 "Template clone": "Cannot verify the source template and its configuration. Check the source template and read permissions.",
                 "new_template_name": "Each new template needs a unique name that is not already in use. Choose a new name, or select Use an existing template.",
                 "location": "Check the ZIA location choice, name, template, and tenant permissions.",
@@ -119,6 +120,13 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
                             "ucaas": site.ucaas_plan.summary() if site.ucaas_plan else None,
                             "dns": site.dns_plan.summary() if site.dns_plan else None,
                             "additional_wans": site.additional_wans,
+                            "ha": {"mode": site.template_settings.get('deployment_type'),
+                                   "gateways": [{"name": site.row[field], "wan": site.row[wan],
+                                                 "address": site.row.get(f'wan{i}_ip') or 'DHCP'}
+                                                for i, field, wan in ((0,'gateway_name','wan_interface_name'),(1,'gateway_name_b','wan1_interface_name'))],
+                                   "management": [{"name": n['name'], "target": n.get('gateway_target'), "interface": n['interface']}
+                                                  for n in site.vlans if n.get('zone','').lower()=='management zone' or 'lo0' in n['interface'].split(',')]}
+                                  if site.row.get('gateway_name_b') else None,
                             "vlans": len(site.vlans), "app_connector": site.row.get("appc_provision") == "1",
                             "segment": site.zpa_segment_plan.application_name if site.zpa_segment_plan else None}
                            for site in plan.sites]
@@ -237,8 +245,6 @@ class DeploymentSession:
             validation = validate_rows(rows, source="Workspace")
             if not validation.valid or not validation.sites:
                 raise ValueError("Select sites and resolve local validation errors first.")
-            if any(site.row.get("gateway_name_b") for site in validation.sites):
-                raise ValueError("HA deployment is not enabled in the UI yet: reference WAN and management mapping still need verification. CSV export remains available.")
             revision, config = self.references.deployment_settings()
             wants_zpa = any(site.row.get("appc_provision") == "1" for site in validation.sites)
             if config.errors(require_zpa=wants_zpa):

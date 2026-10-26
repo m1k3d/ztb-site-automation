@@ -20,6 +20,7 @@ from template_cloning import TemplateCloner, TemplateCloneError
 from ucaas_breakout import LocalBreakout, BreakoutError
 from dns_policy import DnsPolicy, DnsError
 from additional_wans import AdditionalWans
+from ha_deployment import HaError
 
 POLL_RETRIES = 12
 POLL_DELAY_S = 2.0
@@ -197,6 +198,10 @@ class DeploymentEngine:
         detail = self.template_cloner.detail(template_id)
         return {key: detail.get(key) for key in ('deployment_type', 'dhcp_service', 'platform_type')}
 
+    def get_ha_template_interfaces(self, template_id):
+        from template_cloning import read_rows
+        return read_rows(self.template_cloner.get, '/templates/'+template_id+'/interfaces')
+
     def plan(self, validation: ValidationResult) -> DeploymentPlan:
         """Resolve every selected row before any deployment writes. Auth may refresh tokens."""
         plan = DeploymentPlan(issues=list(validation.issues), owner=self)
@@ -227,8 +232,12 @@ class DeploymentEngine:
                 stage = 'template_settings'
                 if template_id not in template_settings:
                     template_settings[template_id] = self.get_template_settings(template_id)
-                settings = template_settings[template_id]
+                settings = deepcopy(template_settings[template_id])
                 check_template_settings(row, settings)
+                if row.get('gateway_name_b'):
+                    from ha_deployment import check_interfaces
+                    stage = 'ha_inventory'
+                    settings['ha_interfaces'] = check_interfaces(row, site.vlans, settings, self.get_ha_template_interfaces(template_id))
                 template_clone = None
                 if row.get("template_mode") == "clone":
                     stage = "Template clone"
@@ -248,6 +257,8 @@ class DeploymentEngine:
                 stage = 'Additional WANs'
                 wans = self.additional_wans.plan(row, template_id)
                 plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan, template_clone, ucaas_plan, dns_plan, wans, deepcopy(settings)))
+            except HaError as exc:
+                plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
             except TemplateSettingsError as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
             except DnsError as exc:
@@ -417,7 +428,7 @@ class DeploymentEngine:
                     if site.additional_wans and not entry.stages.get('Additional WANs'):
                         return False
                     try:
-                        return self.local_breakout.apply(site.ucaas_plan, gateways, name, entry.ucaas)
+                        return self.local_breakout.apply(site.ucaas_plan, gateways, name, entry.ucaas, row=row, site_id=site_id)
                     except BreakoutError as exc:
                         entry.diagnostics["UCaaS local breakout"] = exc.code
                         return False
@@ -1187,24 +1198,29 @@ class DeploymentEngine:
         """Resolve A/B by their requested names, never by API list order."""
         result = {id(v): gw_ids for v in vlans}
         scoped = [v for v in vlans if v.get('gateway_target', 'all') not in ('', 'all')]
-        if not scoped:
+        if not scoped and not row.get('gateway_name_b'):
             return result
         native = self.find_site_row_by_name(row['site_name'])
         cluster = (native or {}).get('cluster_info') or {}
-        if str(cluster.get('site_id') or (native or {}).get('site_id') or '') != str(site_id):
+        if str(cluster.get('site_id') or (native or {}).get('site_id') or (native or {}).get('id') or '') != str(site_id):
             raise ValueError('Cannot verify the site for gateway-specific networks')
         gateways = native.get('gateways') or cluster.get('gateways') or []
         expected_ids = {g.strip() for g in gw_ids.split(',')}
-        for v in scoped:
-            target = v['gateway_target']
-            if target not in ('a', 'b'):
-                raise ValueError('Invalid network gateway assignment')
+        resolved = {}
+        for target in (('a', 'b') if row.get('gateway_name_b') else ('a',)):
             name = row.get('gateway_name' if target == 'a' else 'gateway_name_b')
             matches = [g['gateway_id'] for g in gateways if name and g.get('gateway_name') == name
                        and g.get('gateway_id') in expected_ids]
             if len(matches) != 1:
                 raise ValueError('Cannot uniquely resolve the network gateway assignment')
-            result[id(v)] = matches[0]
+            resolved[target] = matches[0]
+        if len(set(resolved.values())) != len(resolved) or (row.get('gateway_name_b') and set(resolved.values()) != expected_ids):
+            raise ValueError('Cannot uniquely resolve both HA gateway assignments')
+        for v in vlans:
+            target = v.get('gateway_target') or 'all'
+            if target != 'all' and target not in resolved:
+                raise ValueError('Invalid network gateway assignment')
+            result[id(v)] = ','.join(resolved.values()) if target == 'all' else resolved[target]
         return result
 
     def process_vlans_for_site(self, site_id: str, gw_ids: str, cluster_id: int, vlans: list, row: Dict[str, str], dry_run: bool = False, *, diagnostics=None) -> bool:
@@ -1285,6 +1301,24 @@ class DeploymentEngine:
         id_map: Dict[Tuple[str,str,str,str], Dict[str,Any]] = {self._vlan_key(v): v for v in current}
 
         def find_id_for(csv_vlan: Dict[str,Any]) -> Optional[str]:
+            if row.get('gateway_name_b') and csv_vlan.get('gateway_target', 'all') in ('', 'all'):
+                owners = targets[id(csv_vlan)].split(',')
+                ports = csv_vlan['interface'].split(',')
+                if len(ports) == 1:
+                    ports *= len(owners)
+                expected = dict(zip(owners, ports))
+                key = self._vlan_key(csv_vlan)
+                matches = []
+                for network in current:
+                    actual_owners = str(network.get('gateway_id') or '').split(',')
+                    actual_ports = str(network.get('interface') or '').split(',')
+                    actual_key = self._vlan_key(network)
+                    if (len(actual_owners) == len(actual_ports) == len(expected)
+                            and dict(zip(actual_owners, actual_ports)) == expected
+                            and (actual_key[0], actual_key[1], actual_key[3]) == (key[0], key[1], key[3])
+                            and network.get('id')):
+                        matches.append(network)
+                return matches[0]['id'] if len(matches) == 1 else None
             if csv_vlan.get('gateway_target', 'all') not in ('', 'all'):
                 matches = [v for v in current if v.get('gateway_id') == targets[id(csv_vlan)]
                            and self._vlan_key(v) == self._vlan_key(csv_vlan) and v.get('id')]

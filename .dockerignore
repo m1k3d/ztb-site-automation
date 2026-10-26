@@ -16,6 +16,7 @@
 !connection_file.py
 !csv_safety.py
 !deployment_engine.py
+!ha_deployment.py
 !dns_policy.py
 !input_validation.py
 !location_config.py

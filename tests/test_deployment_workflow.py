@@ -44,16 +44,20 @@ class DeploymentWorkflowTests(unittest.TestCase):
         self.mock("list_site_inventory", return_value=[])
         self.mock("site_exists", return_value=False)
         self.template_settings = self.mock('get_template_settings', return_value={'deployment_type':'standard_mode_ha', 'dhcp_service':'server'})
+        self.mock('get_ha_template_interfaces', return_value=[dict(gateway_id=slot,name=name,interface_type=role)
+            for slot in ('Gateway-1','Gateway-2') for name,role in (('ge3','wan'),('ge4','ha'),('ge5','lan'))])
         self.create = self.mock("create_site", return_value=(True, "created", None))
         self.gateways = self.mock(
             "resolve_gateway_ids_and_cluster",
             side_effect=lambda name, **kw: (name + "-gw-a," + name + "-gw-b", 123),
         )
-        self.lookup = self.mock("find_site_row_by_name", side_effect=lambda name: {"id": name + "-id"})
+        self.lookup = self.mock("find_site_row_by_name", side_effect=lambda name: {"id": name + "-id", 'site_id':name+'-id',
+            'gateways':[dict(gateway_id=name+suffix,gateway_name=name+suffix) for suffix in ('-gw-a','-gw-b')]})
         self.post_vlan = self.mock("post_vlan", return_value=(True, "created"))
         self.list_vlans = self.mock(
             "list_site_vlans_v2",
-            side_effect=lambda site_id: [{**self.vlan, "id": site_id + "-vlan"}],
+            side_effect=lambda site_id: [{**self.vlan, "id": site_id + "-vlan", "interface": "ge5,ge5",
+                "gateway_id": ','.join(site_id.removesuffix('-id') + suffix for suffix in ('-gw-a','-gw-b'))}],
         )
         self.put = self.mock("put_json", return_value=Mock(status_code=200, text=""))
         self.patch = self.mock("patch_json", return_value=Mock(status_code=200, text=""))
@@ -132,14 +136,16 @@ class DeploymentWorkflowTests(unittest.TestCase):
         for response in ({"cluster_info": {"site_id": "Site-A-id"}}, {"site_id": "Site-A-id"}, {"id": "Site-A-id"}):
             with self.subTest(response=response):
                 self.lookup.side_effect = None
-                self.lookup.return_value = response
+                self.lookup.return_value = {**response, 'gateways': [dict(gateway_id='Site-A'+suffix,
+                    gateway_name='Site-A'+suffix) for suffix in ('-gw-a','-gw-b')]}
                 self.list_vlans.reset_mock()
                 status, output = self.run_batch()
                 self.assertEqual(status, 0, output)
                 self.list_vlans.assert_called_once_with("Site-A-id")
 
     def test_unresolved_second_site_never_reuses_first_site_id(self):
-        self.lookup.side_effect = lambda name: {"id": "Site-A-id"} if name == "Site-A" else None
+        self.lookup.side_effect = lambda name: {"id": "Site-A-id", 'gateways': [dict(gateway_id='Site-A'+suffix,
+            gateway_name='Site-A'+suffix) for suffix in ('-gw-a','-gw-b')]} if name == "Site-A" else None
         status, output = self.run_batch([self.row(), self.row("Site-B")])
         self.assertEqual(status, 1, output)
         self.list_vlans.assert_called_once_with("Site-A-id")
@@ -224,7 +230,8 @@ class DeploymentWorkflowTests(unittest.TestCase):
                 self.assertEqual(status, 1, output)
 
     def test_requested_stage_timeout_is_reported_and_next_site_continues(self):
-        self.list_vlans.side_effect = [requests.Timeout("fixture read timeout"), [{**self.vlan, "id": "Site-B-id-vlan"}]]
+        self.list_vlans.side_effect = [requests.Timeout("fixture read timeout"), [{**self.vlan, "id": "Site-B-id-vlan",
+            'gateway_id':'Site-B-gw-a,Site-B-gw-b','interface':'ge5,ge5'}]]
         status, output = self.run_batch([self.row(), self.row("Site-B")])
         self.assertEqual(status, 1, output)
         self.assertEqual(self.create.call_count, 2)

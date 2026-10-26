@@ -239,6 +239,7 @@ def _map_dhcp_service_for_csv(raw: Optional[str]) -> str:
     return raw
 
 def vlans_to_csv_rows(vlans: List[Dict[str, Any]], *, gateways=None) -> List[Dict[str, str]]:
+    gateways = ordered_reference_gateways(gateways or [])
     out: List[Dict[str, str]] = []
     targets = {}
     if gateways and len(gateways) > 1:
@@ -462,15 +463,25 @@ def get_private_dns_members(site_id: str) -> str:
 # Main
 # ------------------------
 
+def ordered_reference_gateways(gateways, *, strict=False):
+    if len(gateways) <= 1:return gateways
+    if len(gateways) != 2:raise ValueError('Expected two HA gateways')
+    slots = [g.get('template_gateway_id') for g in gateways]
+    if not any(slots) and not strict:return gateways
+    if set(slots) != {'Gateway-1','Gateway-2'}:
+        raise ValueError('Cannot verify HA template gateway assignments')
+    return sorted(gateways, key=lambda g:g['template_gateway_id'])
+
+
 def site_to_csv_row(row, site_name, private_dns_ips, vlans_file="", *, wan_networks=None):
     """Map a fetched site into editable CSV fields without I/O."""
     ci = row.get("cluster_info") or {}
     # --- Extract per-node WAN fields (supports standalone or HA) ---
-    gws = row.get("gateways") or ci.get("gateways") or []
+    gws = ordered_reference_gateways(row.get("gateways") or ci.get("gateways") or [])
     gw_a = gws[0] if isinstance(gws, list) and len(gws) >= 1 else {}
     gw_b = gws[1] if isinstance(gws, list) and len(gws) >= 2 else {}
 
-    gateway_name_a = row.get("gateway_name") or gw_a.get("gateway_name") or row.get("name") or ""
+    gateway_name_a = gw_a.get("gateway_name") or row.get("gateway_name") or row.get("name") or ""
     gateway_name_b = gw_b.get("gateway_name", "")
 
     wan0_ip   = gw_a.get("wan_ip_address", "")
