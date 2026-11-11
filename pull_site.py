@@ -506,6 +506,15 @@ def site_to_csv_row(row, site_name, private_dns_ips, vlans_file="", *, wan_netwo
         if len(candidates) > 1 and current[0]:
             candidates = [v for v in candidates if v.get("interface") == current[0]]
         if len(candidates) > 1:
+            # Site creation names the activation WAN WAN-<cluster>-<gateway> with
+            # this (misspelled) description; the portal does not allow deleting it.
+            # Additional WANs never carry either marker (live tenant, 2026-11-12).
+            name = str(gateway.get("gateway_name") or "")
+            marked = [v for v in candidates if v.get("description") == "Gatway WAN Interface"
+                      or (name and v.get("name") == f"WAN-{v.get('cluster_id')}-{name}")]
+            if len(marked) == 1:
+                candidates = marked
+        if len(candidates) > 1:
             def address(value):
                 try:
                     result = ipaddress.IPv4Address(str(value or "").strip())
