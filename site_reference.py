@@ -13,6 +13,7 @@ from automation_config import Settings
 from connection_file import parse_connection_file
 from zpa_provisioning import prepare_zpa
 from additional_wans import from_reference
+from forwarding_rules import DEFAULT_RULES, UCAAS_PREFIX, capture
 import json
 from pull_site import (is_ha_internal_vlan, is_wan_vlan, parse_private_dns_members, ordered_reference_gateways,
                        site_to_csv_row, vlans_to_csv_rows)
@@ -305,6 +306,37 @@ class ReferenceSites:
                 }
             return deepcopy(self.interfaces_cache[tid])
 
+    def _forwarding(self, name, gateways, networks, vlans):
+        """The site's own forwarding rules and the objects they use, or None."""
+        policies = {}
+        for gateway, target in zip(gateways[:2], ("a", "b")):
+            data = self._get("/pbr/policies", {"gateway_id": gateway.get("gateway_id") or gateway.get("id")},
+                             "forwarding rules")
+            rows = data.get("policies") if isinstance(data, dict) else None
+            if not isinstance(data, dict) or "policies" not in data or not isinstance(rows, (list, type(None))):
+                raise ReferenceError("Unexpected forwarding rules response. Nothing was imported.")
+            policies[target] = rows or []
+        if not any(not p.get("template_id") and p.get("name") not in DEFAULT_RULES
+                   and not str(p.get("name", "")).startswith(UCAAS_PREFIX) for rows in policies.values() for p in rows):
+            return None
+        groups, total = [], None
+        for page in range(1000):
+            data = self._get("/groups", {"page": page, "size": 100, "sort": "group_id", "sortdir": "asc"},
+                             "objects", version=2)
+            rows, count = (data.get("result"), data.get("count")) if isinstance(data, dict) else (None, None)
+            if not isinstance(rows, list) or type(count) is not int or (page and count != total):
+                raise ReferenceError("Unexpected object list response. Nothing was imported.")
+            total = count
+            groups.extend(rows)
+            if len(groups) >= count or not rows:
+                break
+        if len(groups) != total:
+            raise ReferenceError("The object list was incomplete. Nothing was imported.")
+        try:
+            return capture(name, gateways, policies, networks, vlans, groups)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            raise ReferenceError("Unable to interpret the site's forwarding rules. Nothing was imported.") from None
+
     def pull(self, site_id):
         with self.lock:
             if self.client is None or not isinstance(site_id, str) or site_id not in self.rows:
@@ -330,6 +362,9 @@ class ReferenceSites:
                         vlan.update(subnet="32", dhcp_service="off", dhcp_start="", dhcp_end="")
                         loopbacks += 1
                 gateways = row.get("gateways") or (row.get("cluster_info") or {}).get("gateways") or []
+                snapshot = self._forwarding(name, gateways, networks, vlans)
+                if snapshot:
+                    fields["forwarding_rules_json"] = json.dumps(snapshot, separators=(",", ":"))
                 slots = [g.get("template_gateway_id") or f"Gateway-{i+1}" for i, g in enumerate(gateways[:2])]
                 warnings = []
                 if not fields["wan_interface_name"] or (fields["gateway_name_b"] and not fields["wan1_interface_name"]):
@@ -337,5 +372,7 @@ class ReferenceSites:
                 return {"site": {"fields": fields, "vlans": networks, "interface_gateways": slots,
                                  "reference": {"id": site_id, "name": name}},
                         "loopbacks": loopbacks, "warnings": warnings}
+            except ReferenceError:
+                raise
             except (ValueError, TypeError, AttributeError):
                 raise ReferenceError("Unable to interpret the site's network settings. Nothing was imported.") from None

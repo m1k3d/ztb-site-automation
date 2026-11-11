@@ -21,6 +21,7 @@ import zipfile
 
 from input_validation import validate_rows, without_disabled_dhcp_range
 from zpa_segments import build_segment_plan
+from forwarding_rules import review as forwarding_review
 from site_reference import ReferenceSites
 from ui_deployment import DeploymentSession
 from country_catalog import COUNTRIES
@@ -184,6 +185,7 @@ def validate_batch(batch):
                                      "path_selection": site.row["ucaas_path_selection"].capitalize()} if site.row.get("ucaas_local_breakout") == "1" else None,
                               dns={"domains": site.row.get("dns_private_domains", "")} if site.row.get("dns_split") == "1" else None,
                               additional_wans=json.loads(site.row.get('additional_wans_json','[]')) if site.row.get('copy_additional_wans')=='1' else [],
+                              forwarding=forwarding_review(site.row, site.vlans),
                               zpa=segment.report() if segment else None))
     return dict(valid=not issues, selected_sites=len(validation.sites), issues=issues, sites=plans)
 

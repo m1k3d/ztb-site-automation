@@ -20,6 +20,7 @@ from template_cloning import TemplateCloner, TemplateCloneError
 from ucaas_breakout import LocalBreakout, BreakoutError
 from dns_policy import DnsPolicy, DnsError
 from additional_wans import AdditionalWans
+from forwarding_rules import ForwardingRules, ForwardingError, ForwardingIssue
 from ha_deployment import HaError
 
 POLL_RETRIES = 12
@@ -67,6 +68,7 @@ class PreparedSite:
     dns_plan: object = None
     additional_wans: list = field(default_factory=list)
     template_settings: dict = field(default_factory=dict)
+    forwarding_plan: object = None
 
 
 @dataclass
@@ -89,6 +91,7 @@ class SiteResult:
     ucaas: dict = field(default_factory=dict)
     dns: dict = field(default_factory=dict)
     additional_wans: dict = field(default_factory=dict)
+    forwarding: dict = field(default_factory=dict)
     site_id: str = ''
     gateway_ids: list = field(default_factory=list)
     diagram: dict = field(default_factory=dict)
@@ -215,6 +218,7 @@ class DeploymentEngine:
         self.local_breakout = LocalBreakout(self)
         self.dns_policy = DnsPolicy(self)
         self.additional_wans = AdditionalWans(self)
+        self.forwarding_rules = ForwardingRules(self)
 
     def log(self, *values):
         self._emit(" ".join(str(value) for value in values))
@@ -281,7 +285,9 @@ class DeploymentEngine:
                 dns_plan = self.dns_policy.plan(row)
                 stage = 'Additional WANs'
                 wans = self.additional_wans.plan(row, template_id)
-                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan, template_clone, ucaas_plan, dns_plan, wans, deepcopy(settings)))
+                stage = 'Forwarding rules'
+                forwarding = self.forwarding_rules.plan(row, site.vlans, template_id)
+                plan.sites.append(PreparedSite(site.source, site.row_number, row, deepcopy(site.vlans), payload, template_id, segment_plan, template_clone, ucaas_plan, dns_plan, wans, deepcopy(settings), forwarding_plan=forwarding))
             except TemplateLookupError as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, str(exc)))
             except HaError as exc:
@@ -294,6 +300,8 @@ class DeploymentEngine:
             except BreakoutError as exc:
                 from ucaas_breakout import MESSAGES
                 plan.issues.append(ValidationIssue(site.source, site.row_number, exc.code, MESSAGES[exc.code]))
+            except ForwardingError as exc:
+                plan.issues.append(ForwardingIssue(site.source, site.row_number, exc.code, str(exc)))
             except TemplateCloneError as exc:
                 plan.issues.append(ValidationIssue(site.source, site.row_number, "new_template_name", "A template with this name already exists. Choose a new name or use the existing template."))
             except (Exception, SystemExit) as exc:
@@ -382,6 +390,9 @@ class DeploymentEngine:
                 preview = SiteResult(name, "preview")
                 if site.additional_wans:
                     preview.additional_wans = dict(status='planned',requested=deepcopy(site.additional_wans))
+                if site.forwarding_plan:
+                    preview.forwarding = {**site.forwarding_plan.summary(), "status": "planned"}
+                    self.log(f"DRY: Forwarding rules: copy {len(site.forwarding_plan.rules)} rule(s) from '{site.forwarding_plan.reference}' in reference order around the default rules; {sum(o['action'] == 'append' for o in site.forwarding_plan.objects)} shared object(s) gain this site's networks; {sum(o['action'] == 'create' for o in site.forwarding_plan.objects)} rule object(s) to create.")
                 if site.dns_plan:
                     preview.dns = {**site.dns_plan.summary(), "status": "planned"}
                     self.log(f"DRY: Split DNS: preserve Zscaler and ZPA priority; private domains before the catch-all; remaining domains to WAN DNS.")
@@ -460,7 +471,7 @@ class DeploymentEngine:
             private_dns = row.get("private_dns", "")
             is_ha = len(gateways.split(",")) > 1
             site_id = None  # Never carry another row's target forward.
-            if private_dns or site.vlans or is_ha or site.dns_plan or site.additional_wans:
+            if private_dns or site.vlans or is_ha or site.dns_plan or site.additional_wans or site.forwarding_plan:
                 try:
                     site_id = self.resolve_site_id(name)
                 except Exception as exc:
@@ -501,6 +512,21 @@ class DeploymentEngine:
                 actions.append(("VLANs", lambda: bool(site_id) and self.process_vlans_for_site(site_id, gateways, cluster_id, site.vlans, row, diagnostics=entry.diagnostics)))
             if is_ha:
                 actions.append(("VRRP", lambda: bool(site_id) and self.configure_vrrp(gateways, cluster_id, site.vlans, row, site_id)))
+            if site.forwarding_plan:
+                def configure_forwarding():
+                    entry.forwarding.update(site.forwarding_plan.summary(), status="blocked")
+                    # Copied rules can use VLAN sub-interfaces, extra WANs and sit below UCaaS rules.
+                    needed = [stage for stage, wanted in (("VLANs", site.vlans), ("Additional WANs", site.additional_wans),
+                                                          ("UCaaS local breakout", site.ucaas_plan)) if wanted]
+                    if not site_id or not all(entry.stages.get(stage) for stage in needed):
+                        entry.diagnostics["Forwarding rules"] = "forwarding_prerequisite"
+                        return False
+                    try:
+                        return self.forwarding_rules.apply(site.forwarding_plan, gateways, site_id, row, entry.forwarding)
+                    except ForwardingError as exc:
+                        entry.diagnostics["Forwarding rules"] = exc.code
+                        return False
+                actions.append(("Forwarding rules", configure_forwarding))
             if row.get("appc_provision") == "1":
                 resources = entry.zpa_segments.get("resources") if site.zpa_segment_plan else None
                 actions.append(("ZPA", lambda: zpa_provisioning.provision_zpa_for_site(row, self.client, self.client.base_root, cluster_id=cluster_id, config=self.config, context=plan.zpa_context, resources=resources)))

@@ -164,6 +164,7 @@ td input:not([type=checkbox]),.branches-table input{font-size:14px!important;hei
 
 .ucaas-ports{font-size:.85rem;font-weight:600;color:var(--text);overflow-wrap:anywhere}.ucaas-rule-review{padding-left:1.3rem}.ucaas-rule-review>li{margin:12px 0}.ucaas-rule-review p{margin:5px 0}.ucaas-rule-review details{font-size:.8rem;overflow-wrap:anywhere}
 .vlan-gateway-target{max-width:360px;margin-bottom:18px}
+.forwarding-rule-review{padding-left:1.3rem;font-size:12px}.forwarding-rule-review>li{margin:12px 0}.forwarding-rule-review p{margin:5px 0}
 .additional-wans{margin-top:20px;border:1px solid var(--line);border-radius:8px;padding:16px}.additional-wans summary{cursor:pointer;font-size:13px;font-weight:600}.additional-wans[open] summary{margin-bottom:16px}.additional-wans .wan-gateway{margin-top:16px}
 
 /* Diagram handoff: compact controls, a large readable preview and persistent runs. */

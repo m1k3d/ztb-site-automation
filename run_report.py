@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 from ucaas_breakout import MESSAGES as UCAAS_MESSAGES
 from dns_policy import MESSAGES as DNS_MESSAGES
+from forwarding_rules import MESSAGES as FORWARDING_MESSAGES
 
 
 DIAGNOSTIC_MESSAGES = {
@@ -15,6 +16,7 @@ DIAGNOSTIC_MESSAGES = {
     ("Existing site check", "inventory_unreadable"): "The site inventory could not be read completely. No changes were made to this site. Check inventory access and retry after inventory changes settle. Repeated or inconsistent pages are blocked; the supported inventory limit is 10,000 sites.",
     **{("UCaaS local breakout", code): message for code, message in UCAAS_MESSAGES.items()},
     **{("DNS policy", code): message for code, message in DNS_MESSAGES.items()},
+    **{("Forwarding rules", code): message for code, message in FORWARDING_MESSAGES.items()},
     ("Template clone", "template_name_exists"): "A template with this name already exists. No clone or site was created. Choose a new name, or explicitly select the existing template.",
     ("Template clone", "template_source_changed"): "The source template changed after preview. No clone or site was created. Preview the rollout again.",
     ("Template clone", "template_check_failed"): "Could not recheck the template inventory or source configuration. No clone or site was created. Restore template read access before retrying.",
@@ -83,6 +85,8 @@ def save_report(path, result, *, dry_run=False, workspace=None):
             site['dns'] = outcome.dns
         if outcome.additional_wans:
             site['additional_wans'] = outcome.additional_wans
+        if outcome.forwarding:
+            site['forwarding'] = outcome.forwarding
         if outcome.artifacts:
             site['diagrams'] = outcome.artifacts
         if outcome.diagram.get('error'):
@@ -131,5 +135,14 @@ def save_report(path, result, *, dry_run=False, workspace=None):
         if site.get('dns'):
             dns = site['dns']
             lines.append(f"DNS policy: {dns['status']}; private domains {', '.join(dns['domains'])}; order: " + ' → '.join(dns['order']))
+        if site.get('forwarding'):
+            forwarding = site['forwarding']
+            lines.append(f"Forwarding rules: {forwarding['status']}; {len(forwarding.get('rules', []))} copied from {forwarding.get('reference')}; "
+                         + '; '.join(f"{p['display_name']} ({p['name']}) · ID {p.get('id', 'unconfirmed')} · {p['status']}" for p in forwarding.get('policies', [])))
+            for item in forwarding.get('objects', []):
+                if item.get('action') == 'create':
+                    lines.append(f"Forwarding rule object {item['name']}: {item.get('status', 'planned')}")
+                elif item.get('missing'):
+                    lines.append(f"Shared object {item['name']} unchanged; it does not include this site's {', '.join(item['missing'])}")
         lines.append(site['next_action'])
     path.with_suffix('.txt').write_text('\n'.join(lines)+'\n')

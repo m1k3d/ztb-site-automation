@@ -137,3 +137,48 @@ test('layout update errors stay visible beside the control and allow retry',asyn
   assert.equal(retry.disabled,false);assert.equal(menu.open,true);
   assert.equal(feedback.textContent,'Diagram could not be updated');assert.equal(w.get('diagram-dialog').open,false);
 });
+
+test('preview and results list copied forwarding rules and unchanged shared objects',()=>{
+  const w=workspace(),texts=el=>[el.textContent,...el.children.flatMap(texts)];
+  const forwarding={reference:'Utrecht-NL-BR',placement:'Same order as the reference site, around the platform default rules',skipped:0,
+    rules:[{gateway_target:'a',display_name:'Guest-Block',source:'Guest Networks',destination:'All ZPA App Segments',ports:'Any',egress:'ge2.79 via 172.17.69.1',path:'None'}],
+    objects:[{key:'id:152',action:'reuse',name:'Guest Networks',display_name:'Guest Networks',missing:['172.17.69.0/24']}]};
+  w.context.deploymentJob={id:'preview-a',state:'ready',site_count:1,sites:[{name:'Branch',status:'preview',forwarding:{...forwarding,status:'planned'}}],details:[{name:'Branch',vlans:2,forwarding}]};
+  w.context.renderDeployment();
+  let shown=texts(w.get('deployment-results'));
+  assert.ok(shown.includes('Forwarding rules'));
+  assert.ok(shown.includes('Guest Networks → All ZPA App Segments · Ports: Any · ge2.79 via 172.17.69.1 · Path: None'));
+  assert.ok(shown.includes('Shared object Guest Networks · unchanged · doesn’t include 172.17.69.0/24'));
+  w.context.deploymentJob={id:'run-b',state:'completed',sites:[{name:'Branch',status:'success',forwarding:{...forwarding,status:'configured',
+    objects:[{name:'Guest Networks',action:'reuse',status:'reused',missing:['172.17.69.0/24']}],
+    policies:[{display_name:'Guest-Block',name:'Guest-Blo-Ab12Cd34',id:2001,status:'verified',gateway_target:'a'}]}}]};
+  w.context.renderDeployment();
+  shown=texts(w.get('deployment-results'));
+  assert.ok(shown.includes('Shared object Guest Networks · unchanged · doesn’t include 172.17.69.0/24'));
+  assert.ok(shown.includes('Guest-Block · Guest-Blo-Ab12Cd34 · ID 2001 · verified'));
+});
+
+test('site details list copied rules read-only, Gateway B only for HA',()=>{
+  const elements=new Map(),element=(tag='div',text='')=>({tagName:tag,textContent:text,children:[],hidden:false,
+    append(...items){this.children.push(...items);},replaceChildren(...items){this.children=[...items];}});
+  const get=id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);};
+  const rule=(target,name,extra={})=>({gateway_target:target,display_name:name,nh_interfaces_type:'lan_wan',src_group_id_set:[152],
+    dst_group_id_set:[34],dst_app_segment_id_set:[],dst_port_group_id:-1,primary_int:'ge2.69',secondary_int:'ge2.69',...extra});
+  const data={rules:[rule('a','Guest-Block'),rule('b','Guest-Block'),rule('a','Syslog',{nh_interfaces_type:'zpa',src_group_id_set:[35],dst_group_id_set:[],dst_app_segment_id_set:['7205']})],
+    objects:[{id:152,name:'Guest Networks',display_name:'Guest Networks'},{id:34,name:'System-All-ZPA-Apps-Group',display_name:'All ZPA App Segments'},{id:35,name:'System-Local-Traffic-Group',display_name:'Local interface IPs'}]};
+  const site={ha_enabled:false,fields:{forwarding_rules_json:JSON.stringify(data)}};
+  const context=vm.createContext({$:get,node:element,currentSite:()=>site});
+  const source=fs.readFileSync(path.join(__dirname,'../ui/app.js'),'utf8');
+  const start=source.indexOf('function renderForwardingRules(');
+  vm.runInContext(source.slice(start,source.indexOf('$("gateway-setup")',start)),context);
+  context.renderForwardingRules();
+  const rows=()=>get('forwarding-rule-rows').children.map(item=>item.children.map(child=>child.textContent).join(' | '));
+  assert.equal(get('forwarding-rules').hidden,false);
+  assert.equal(get('forwarding-rules-summary').textContent,'Forwarding rules from reference · 2 rules');
+  assert.deepEqual(rows(),['Guest-Block | Guest Networks → All ZPA App Segments · Ports: Any · ge2.69',
+    'Syslog | Local interface IPs → 1 ZPA application segment(s) · Ports: Any · ZPA']);
+  site.ha_enabled=true;context.renderForwardingRules();
+  assert.equal(rows().length,3);assert.ok(rows()[1].startsWith('Gateway B · Guest-Block'));
+  site.fields.forwarding_rules_json='';context.renderForwardingRules();
+  assert.equal(get('forwarding-rules').hidden,true);
+});

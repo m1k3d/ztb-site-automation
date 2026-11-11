@@ -282,6 +282,7 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
         if post != "1":
             continue
         row = {str(k): str(v if v is not None else "").strip() for k, v in raw.items() if k != "vlans"}
+        issues_before = len(result.issues)
         from additional_wans import selections
         copy_wans = check.check('copy_additional_wans', lambda: boolean(row.get('copy_additional_wans','')))
         row['copy_additional_wans'] = '1' if copy_wans else '0'
@@ -432,6 +433,10 @@ def validate_rows(rows, *, base_dir=".", source="sites", numbered=False):
                     if segment.application_name in zpa_names:
                         check.error("site_name", "generated ZPA name collides with another selected site")
                     zpa_names[segment.application_name] = number
+        if row.get("forwarding_rules_json") and len(result.issues) == issues_before:
+            # Same offline translation as tenant preview; shows mapping problems early.
+            from forwarding_rules import translate
+            check.check("forwarding_rules_json", lambda: translate(row, vlans))
         result.sites.append(ValidatedSite(str(source), number, row, vlans))
     return result
 

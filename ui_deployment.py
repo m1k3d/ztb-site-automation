@@ -20,6 +20,7 @@ from run_report import reserve_report, save_report, public_diagnostics
 from ucaas_breakout import MESSAGES as UCAAS_MESSAGES
 from dns_policy import MESSAGES as DNS_MESSAGES
 from ha_deployment import MESSAGES as HA_MESSAGES
+from forwarding_rules import MESSAGES as FORWARDING_MESSAGES, ForwardingIssue
 from zpa_segments import SegmentConflictIssue
 from site_diagrams import capture_results
 from diagram_store import DiagramStore
@@ -50,7 +51,8 @@ def plan_digest(plan):
                               if site.template_clone else None,
                               "ucaas": site.ucaas_plan.summary() if site.ucaas_plan else None,
                               "dns": site.dns_plan.summary() if site.dns_plan else None,
-                              "additional_wans": site.additional_wans} for site in plan.sites],
+                              "additional_wans": site.additional_wans,
+                              "forwarding": site.forwarding_plan.summary() if site.forwarding_plan else None} for site in plan.sites],
                    "zpa": {"base": plan.zpa_context.base_url, "customer": plan.zpa_context.customer_id,
                            "certificate": plan.zpa_context.enrollment_cert_id} if plan.zpa_context else None})
 
@@ -62,6 +64,7 @@ def public_sites(result):
              "ucaas": deepcopy(site.ucaas),
              "dns": deepcopy(site.dns),
              "additional_wans": deepcopy(site.additional_wans),
+             "forwarding": deepcopy(site.forwarding),
              "artifacts": deepcopy(site.artifacts),
              "diagram_warning": site.diagram.get('error', ''),
              "next_action": NEXT_ACTION.get(site.status, "Inspect this site before retrying."),
@@ -73,16 +76,17 @@ def public_issues(issues):
     # Exception strings can contain raw HTTP bodies. Expose a useful, fixed action per field.
     from site_payload import TEMPLATE_MESSAGES
     from deployment_engine import TEMPLATE_LOOKUP_MESSAGES
-    messages = {**TEMPLATE_MESSAGES, **TEMPLATE_LOOKUP_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, **HA_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
+    messages = {**TEMPLATE_MESSAGES, **TEMPLATE_LOOKUP_MESSAGES, **UCAAS_MESSAGES, **DNS_MESSAGES, **HA_MESSAGES, **FORWARDING_MESSAGES, "template_name/template_id": "Check the site template name or ID and permission to read templates.",
                 "Template clone": "Cannot verify the source template and its configuration. Check the source template and read permissions.",
                 "new_template_name": "Each new template needs a unique name that is not already in use. Choose a new name, or select Use an existing template.",
                 "location": "Check the ZIA location choice, name, template, and tenant permissions.",
                 "credentials": "Check the ZTB connection and, when requested, the ZPA connection settings.",
                 "ZPA preflight": "Check ZPA credentials, customer, enrollment certificate, and conflicting segment names or subnets.",
                 "ZPA segments": "Review selected LAN subnets and ZPA segment settings.",
-                "Additional WANs": "Check additional WAN addresses, gateway assignments, and WAN ports on the selected template."}
+                "Additional WANs": "Check additional WAN addresses, gateway assignments, and WAN ports on the selected template.",
+                "Forwarding rules": "Check the copied forwarding rules against this branch's networks and WANs, then preview again."}
     return [{"row": issue.row, "field": issue.field,
-             "message": issue.message if isinstance(issue, SegmentConflictIssue) else
+             "message": issue.message if isinstance(issue, (SegmentConflictIssue, ForwardingIssue)) else
              messages.get(issue.field, "Check this field using Validate & review before trying again.")} for issue in issues]
 
 
@@ -131,6 +135,7 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
                             "ucaas": site.ucaas_plan.summary() if site.ucaas_plan else None,
                             "dns": site.dns_plan.summary() if site.dns_plan else None,
                             "additional_wans": site.additional_wans,
+                            "forwarding": site.forwarding_plan.summary() if site.forwarding_plan else None,
                             "ha": {"mode": site.template_settings.get('deployment_type'),
                                    "gateways": [{"name": site.row[field], "wan": site.row[wan],
                                                  "address": site.row.get(f'wan{i}_ip') or 'DHCP'}
@@ -162,7 +167,7 @@ def run_worker(rows, config, mode, expected_plan, report_dir, channel, project_i
             safe_result = BatchResult(sites=[SiteResult(site.name, site.status, dict(site.stages),
                 zpa_segments=deepcopy(site.zpa_segments), diagnostics=dict(site.diagnostics), template=dict(site.template),
                 ucaas=deepcopy(site.ucaas), dns=deepcopy(site.dns), additional_wans=deepcopy(site.additional_wans),
-                site_id=site.site_id, gateway_ids=list(site.gateway_ids), artifacts=deepcopy(site.artifacts),
+                forwarding=deepcopy(site.forwarding), site_id=site.site_id, gateway_ids=list(site.gateway_ids), artifacts=deepcopy(site.artifacts),
                 diagram={'error':site.diagram.get('error','')}) for site in result.sites], issues=result.issues)
             save_report(report_path, safe_result, workspace={'project_id': project_id,
                         'tenant': urlsplit(config.ztb_api_base).hostname})

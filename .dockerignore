@@ -18,6 +18,7 @@
 !deployment_engine.py
 !ha_deployment.py
 !dns_policy.py
+!forwarding_rules.py
 !input_validation.py
 !location_config.py
 !project_store.py

@@ -283,7 +283,7 @@ function render() {
     else {if (input.tagName === "SELECT" && value && ![...input.options].some(o => o.value === value)) input.add(new Option(value, value)); input.value = value;}
   });
   renderLocationName();renderGatewayNames();renderTemplateName();renderDns();
-  renderWanModes();renderAdditionalWans();
+  renderWanModes();renderAdditionalWans();renderForwardingRules();
   renderUcaas();diagrams?.renderOptions();
   renderWanInterfacePickers();renderVlans(); setTab(activeTab);ensureInterfaceChoices();
 }
@@ -341,6 +341,26 @@ function renderAdditionalWans() {
     }
     card.append(grid);host.append(card);
   });
+}
+function renderForwardingRules() {
+  const site=currentSite();if(!site)return;
+  let data=null;
+  try {data=JSON.parse(site.fields.forwarding_rules_json || 'null');}catch{}
+  const rules=(Array.isArray(data?.rules) ? data.rules : []).filter(rule=>site.ha_enabled || rule.gateway_target==='a');
+  $('forwarding-rules').hidden=!rules.length;
+  $('forwarding-rules-summary').textContent=`Forwarding rules from reference · ${rules.length} rule${rules.length===1 ? '' : 's'}`;
+  const names=new Map((data?.objects || []).map(object=>[object.id,object.display_name || object.name]));
+  const label=ids=>(ids || []).map(id=>names.get(id) || `Object ${id}`);
+  const host=$('forwarding-rule-rows');host.replaceChildren();
+  for(const rule of rules) {
+    const destinations=[...label(rule.dst_group_id_set),...(rule.dst_app_segment_id_set?.length ? [`${rule.dst_app_segment_id_set.length} ZPA application segment(s)`] : [])];
+    const egress=rule.nh_interfaces_type==='zpa' ? 'ZPA' : String(rule.nh_interfaces_type).startsWith('zia') ? 'ZIA tunnel' :
+      [...new Set([rule.primary_int,rule.secondary_int].filter(Boolean))].join(' → ') || 'Configured routing';
+    const item=node('li');
+    item.append(node('strong',`${site.ha_enabled ? 'Gateway '+rule.gateway_target.toUpperCase()+' · ' : ''}${rule.display_name}`),
+      node('p',`${rule.src_group_negate ? 'Not ' : ''}${label(rule.src_group_id_set).join(', ') || 'Any'} → ${rule.dst_group_negate ? 'Not ' : ''}${destinations.join(', ') || 'Any'} · Ports: ${rule.dst_port_group_id>0 ? names.get(rule.dst_port_group_id) || 'Object '+rule.dst_port_group_id : 'Any'} · ${egress}`));
+    host.append(item);
+  }
 }
 $("gateway-setup").addEventListener('change',()=>{
   const site=currentSite();if(!site)return;
@@ -726,7 +746,7 @@ async function review() {
       }); target.append(list);
     } else if (ready) {
       const wrapper = node("div", undefined, "review-table"), table = node("table"), head = node("thead"), headRow = node("tr"), body = node("tbody");
-      ["Site", "Template action", "VLANs", "Additional WANs", "ZPA application segment", "UCaaS local breakout", "DNS policy"].forEach(label => headRow.append(node("th", label))); head.append(headRow);
+      ["Site", "Template action", "VLANs", "Additional WANs", "ZPA application segment", "UCaaS local breakout", "DNS policy", "Forwarding rules"].forEach(label => headRow.append(node("th", label))); head.append(headRow);
       result.sites.forEach(site => {
         const row = node("tr"), name = node("td", site.name), count = node("td", String(site.vlans)), zpa = node("td");
         if (site.zpa) {
@@ -739,7 +759,7 @@ async function review() {
         }
         else zpa.textContent = "Not requested";
         const template=node('td',site.template.mode==='clone' ? `Create “${site.template.name}” from “${site.template.source}”, then deploy site.` : `Use “${site.template.source}”.`);
-        row.append(name,template,count,node('td',(site.additional_wans || []).map(w=>`Gateway ${w.gateway_target.toUpperCase()}: ${w.interface} (${w.mode==='dhcp' ? 'DHCP' : w.ip+'/'+w.mask})`).join('; ') || 'None'),zpa,node('td',site.ucaas ? `Requested: ${site.ucaas.services} · ${site.ucaas.path_selection || 'Best'}. WANs and objects checked during tenant preview.` : 'Off'),node('td',site.dns ? `Private domains: ${site.dns.domains}. After ZPA, before all other domains → WAN DNS.` : 'Automatic defaults')); body.append(row);
+        row.append(name,template,count,node('td',(site.additional_wans || []).map(w=>`Gateway ${w.gateway_target.toUpperCase()}: ${w.interface} (${w.mode==='dhcp' ? 'DHCP' : w.ip+'/'+w.mask})`).join('; ') || 'None'),zpa,node('td',site.ucaas ? `Requested: ${site.ucaas.services} · ${site.ucaas.path_selection || 'Best'}. WANs and objects checked during tenant preview.` : 'Off'),node('td',site.dns ? `Private domains: ${site.dns.domains}. After ZPA, before all other domains → WAN DNS.` : 'Automatic defaults'),node('td',site.forwarding ? `${site.forwarding.rules} copied from ${site.forwarding.reference}.${site.forwarding.missing.length ? ' Shared objects stay unchanged; '+site.forwarding.missing.join(', ')+' won’t include this branch’s network.' : ''}` : 'None')); body.append(row);
       }); table.append(head,body); wrapper.append(table); target.append(wrapper);
     }
     localReviewReady=ready;$("export").disabled = !ready;showView("review");renderDeployment();refreshConnectionStatus();
@@ -889,6 +909,22 @@ function renderDeploymentResults(active) {
     if(extraWans.length){
       row.append(node('h4','Additional WANs'));
       for(const wan of extraWans)row.append(node('p',`Gateway ${wan.gateway_target.toUpperCase()} · ${wan.interface} · ${wan.mode==='dhcp' ? 'DHCP' : wan.ip+'/'+wan.mask+' · Next hop '+wan.gateway}`,'addressing-help'));
+    }
+    const forwarding=site.forwarding?.rules?.length ? site.forwarding : detail?.forwarding;
+    if(forwarding?.rules?.length) {
+      row.append(node('h4','Forwarding rules'),node('p',`Copied from ${forwarding.reference}. ${forwarding.placement}.${forwarding.skipped ? ` ${forwarding.skipped} Gateway B rule(s) are not used by a standalone branch.` : ''}`,'addressing-help'));
+      const list=node('ol',undefined,'forwarding-rule-review'), peers=forwarding.rules.some(rule=>rule.gateway_target==='b');
+      for(const rule of forwarding.rules) {
+        const item=node('li');
+        item.append(node('strong',`${peers ? 'Gateway '+rule.gateway_target.toUpperCase()+' · ' : ''}${rule.display_name}`),node('p',`${rule.source} → ${rule.destination} · Ports: ${rule.ports} · ${rule.egress} · Path: ${rule.path}`));
+        list.append(item);
+      }
+      row.append(list);
+      for(const object of forwarding.objects || []) {
+        if(object.missing?.length)row.append(node('p',`Shared object ${object.display_name || object.name} · unchanged · doesn’t include ${object.missing.join(', ')}`,'addressing-help'));
+        else if(object.action==='create')row.append(node('p',`Rule object ${object.name} · ${object.status || 'create'}`,'addressing-help'));
+      }
+      for(const policy of site.forwarding?.policies || [])row.append(node('p',`${policy.display_name} · ${policy.name} · ${policy.id ? 'ID '+policy.id : 'ID unconfirmed'} · ${policy.status}`,'addressing-help'));
     }
     const dns=site.dns?.domains ? site.dns : detail?.dns;
     if(dns?.domains) {

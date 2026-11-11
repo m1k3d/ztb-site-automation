@@ -163,6 +163,7 @@ The release review fixed the CSV export findings. The container still has upstre
 - [Site and VLAN field reference](docs/configuration.md)
 - [ZPA provisioning](ZPA_PROVISIONING_README.md)
 - [Private-domain DNS](docs/private-domain-dns.md) and [UCaaS local breakout](docs/ucaas-local-breakout.md)
+- [Forwarding rules from the reference site](docs/forwarding-rules.md)
 - [Development and tests](docs/development.md)
 
 ## License
