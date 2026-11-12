@@ -242,6 +242,37 @@ class ReferenceSitesTests(unittest.TestCase):
         self.assertEqual(result["loopbacks"], 1)
         self.assertTrue(all(call.args[0] == "GET" for call in self.client.request.call_args_list))
 
+    def pull_with_template(self, template_response, per_site_dns=None):
+        self.site["cluster_info"].update(template_id="t-1", per_site_dns=per_site_dns)
+        self.connect()
+        self.client.request.side_effect = [self.response({"rows": []}),
+            self.response({"result": [{"site_id": "42", "membership_info": {"ip_prefix": ["10.2.0.1/32"]}}]}),
+            template_response]
+        result = self.reader.pull("42")
+        self.assertEqual(self.client.request.call_args_list[-1].args, ("GET", self.client.api_v3 + "/templates/t-1"))
+        return result
+
+    def test_pull_fills_wan_dns_and_dhcp_mode_from_the_template(self):
+        result = self.pull_with_template(self.response(
+            {"id": "t-1", "name": "Branch", "private_dns": "1.1.1.1, 8.8.8.8", "dhcp_service": "relay"}))
+        fields = result["site"]["fields"]
+        self.assertEqual((fields["wan_dns"], fields["dhcp_service_mode"], fields["private_dns"]),
+                         ("1.1.1.1,8.8.8.8", "relay", "10.2.0.1"))
+        self.assertFalse(any("template" in w for w in result["warnings"]))
+
+    def test_site_wan_dns_wins_over_the_template(self):
+        result = self.pull_with_template(self.response(
+            {"id": "t-1", "name": "Branch", "private_dns": "1.1.1.1,8.8.8.8", "dhcp_service": "server"}), "9.9.9.9")
+        self.assertEqual((result["site"]["fields"]["wan_dns"], result["site"]["fields"]["dhcp_service_mode"]),
+                         ("9.9.9.9", "server"))
+
+    def test_unreadable_template_still_imports_with_a_warning(self):
+        result = self.pull_with_template(self.response({}, 403))
+        fields = result["site"]["fields"]
+        self.assertEqual(fields["wan_dns"], "")
+        self.assertNotIn("dhcp_service_mode", fields)
+        self.assertIn("check WAN DNS and LAN DHCP mode", " ".join(result["warnings"]))
+
     def test_unknown_id_is_rejected_before_network_request(self):
         self.connect()
         self.client.request.reset_mock()

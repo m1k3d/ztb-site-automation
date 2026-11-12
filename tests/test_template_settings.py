@@ -52,6 +52,14 @@ class TemplateSettingsTests(unittest.TestCase):
         self.assertEqual(plan.sites[0].payload['dhcp_server_ip'],'10.1.0.10')
         self.assertNotIn('dhcp_service',plan.sites[0].payload)
 
+    def test_wan_dns_matching_the_template_stays_inherited(self):
+        self.template['private_dns']='1.1.1.1,8.8.8.8'
+        self.assertEqual(self.plan(wan_dns='1.1.1.1, 8.8.8.8').sites[0].payload['private_dns'],'')
+        self.assertEqual(self.plan(wan_dns='').sites[0].payload['private_dns'],'')
+        for changed in ('9.9.9.9','8.8.8.8,1.1.1.1'):
+            with self.subTest(changed=changed):
+                self.assertEqual(self.plan(wan_dns=changed).sites[0].payload['private_dns'],changed)
+
     def test_both_ha_modes_require_two_gateways_and_standalone_requires_one(self):
         for mode in ('standard_mode_ha','wan_edge_mode_ha'):
             self.template['deployment_type']=mode

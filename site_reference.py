@@ -14,6 +14,7 @@ from connection_file import parse_connection_file
 from zpa_provisioning import prepare_zpa
 from additional_wans import from_reference
 from forwarding_rules import DEFAULT_RULES, UCAAS_PREFIX, capture
+from site_payload import dns_servers
 import json
 from pull_site import (is_ha_internal_vlan, is_wan_vlan, parse_private_dns_members, ordered_reference_gateways,
                        site_to_csv_row, vlans_to_csv_rows)
@@ -337,6 +338,17 @@ class ReferenceSites:
         except (ValueError, TypeError, AttributeError, KeyError):
             raise ReferenceError("Unable to interpret the site's forwarding rules. Nothing was imported.") from None
 
+    def _template(self, row):
+        """Template settings a new site inherits; None when they cannot be read."""
+        template_id = row.get("template_id") or (row.get("cluster_info") or {}).get("template_id")
+        if not isinstance(template_id, str) or not template_id:
+            return None
+        try:
+            data = self._get("/templates/" + quote(template_id, safe=""), None, "site template")
+        except ReferenceError:
+            return None
+        return data if isinstance(data, dict) and data.get("id") == template_id else None
+
     def pull(self, site_id):
         with self.lock:
             if self.client is None or not isinstance(site_id, str) or site_id not in self.rows:
@@ -346,6 +358,7 @@ class ReferenceSites:
                 "site VLANs", version=2), "VLAN", allow_list=True)
             dns_data = self._get("/group-membership", {"site_id": site_id,
                 "group_name": "System-Private-DNS-Servers-Group", "refresh_token": "enabled"}, "private DNS", version=2)
+            template = self._template(row)
             try:
                 private_dns = parse_private_dns_members(dns_data, site_id)
                 row = deepcopy(row)
@@ -367,6 +380,13 @@ class ReferenceSites:
                     fields["forwarding_rules_json"] = json.dumps(snapshot, separators=(",", ":"))
                 slots = [g.get("template_gateway_id") or f"Gateway-{i+1}" for i, g in enumerate(gateways[:2])]
                 warnings = []
+                if template is None:
+                    warnings.append("The reference template could not be read; check WAN DNS and LAN DHCP mode before deployment.")
+                else:
+                    if not fields["wan_dns"]:
+                        fields["wan_dns"] = ",".join(dns_servers(template.get("private_dns")))
+                    if template.get("dhcp_service") in ("server", "relay"):
+                        fields["dhcp_service_mode"] = template["dhcp_service"]
                 if not fields["wan_interface_name"] or (fields["gateway_name_b"] and not fields["wan1_interface_name"]):
                     warnings.append("WAN assignment could not be resolved uniquely; choose the WAN interface before deployment.")
                 return {"site": {"fields": fields, "vlans": networks, "interface_gateways": slots,

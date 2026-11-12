@@ -30,6 +30,7 @@ const ZtbRollout = {install(ctx) {
     $('rollout-summary').textContent=`${indices.length} ${indices.length===1?'branch':'branches'} · ${valid?available.length+' ready · '+needs+(needs===1?' needs changes':' need changes'):'Checking readiness…'} · ${complete} completed`;
     $('rollout-selected').textContent=`${selected.length} ${selected.length===1?'branch':'branches'} selected`;
     $('rollout-review').disabled=!selected.length || ctx.active();
+    $('rollout-remove').disabled=!selected.length || ctx.active();
     $('rollout-select-ready').disabled=!available.length || ctx.active();
     const all=$('rollout-select-all');all.disabled=!available.length || ctx.active();all.checked=!!available.length && available.every(i=>selected.includes(i));all.indeterminate=!all.checked && available.some(i=>selected.includes(i));
     $('rollout-group').checked=ctx.grouped();
@@ -98,7 +99,7 @@ const ZtbRollout = {install(ctx) {
   $('rollout-select-ready').onclick=()=>select(ctx.batch().map((s,i)=>i).filter(groupEligible),true,true);
   $('rollout-select-all').onchange=()=>select(ctx.batch().map((s,i)=>i).filter(i=>$('rollout-select-all').checked?groupEligible(i):!ctx.batch()[i].reference),$('rollout-select-all').checked,true);
   $('rollout-group').onchange=()=>{ctx.setGrouped($('rollout-group').checked);render();};
-  $('rollout-review').onclick=ctx.review;$('rollout-refresh').onclick=()=>refresh(true);
+  $('rollout-review').onclick=ctx.review;$('rollout-remove').onclick=()=>{if(!ctx.active())ctx.removeSelected();};$('rollout-refresh').onclick=()=>refresh(true);
   $('overview-create').onclick=()=>{const i=ctx.batch().findIndex(s=>s.reference);if(i<0)ctx.reference();else{ctx.edit(i);$('duplicate').click();}};
   for(const [target,source] of [['reference-pull','pull-reference'],['reference-import','import'],['overview-import','import'],['reference-blank','add-site'],['overview-add','add-site'],['reference-example','example']])$(target).onclick=()=>$(source).click();
   $('help-open').onclick=()=>$('help-dialog').showModal();$('help-close').onclick=()=>$('help-dialog').close();

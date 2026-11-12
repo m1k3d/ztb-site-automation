@@ -31,9 +31,20 @@ def check_template_settings(row, settings):
         raise TemplateSettingsError('template_dhcp_relay')
 
 
-def build_site_payload(row, location):
+def dns_servers(value):
+    """Ordered DNS server list from a comma-separated string or a list."""
+    items = value if isinstance(value, list) else str(value or "").split(",")
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def build_site_payload(row, location, template=None):
     name = row["site_name"]
-    payload = {"name": name, "site_name": name, "private_dns": row.get("wan_dns", ""), "gateways": []}
+    wan_dns = row.get("wan_dns", "")
+    # The site API names WAN DNS private_dns. A value equal to the template's
+    # stays inherited, as on a site created in the portal without an override.
+    if template is not None and dns_servers(wan_dns) == dns_servers(template.get("private_dns")):
+        wan_dns = ""
+    payload = {"name": name, "site_name": name, "private_dns": wan_dns, "gateways": []}
     # deploy_site inherits the template DHCP service; it does not accept a
     # service override. Preflight checks that an explicit choice agrees.
     if row.get("dhcp_server_ip"):

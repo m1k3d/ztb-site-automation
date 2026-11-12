@@ -151,6 +151,9 @@ function renderDns() {
   $('dns-preview-domains').textContent=list(site.fields.dns_private_domains) || 'Enter private domains above';
   $('dns-preview-private').textContent=list(site.fields.private_dns) || 'Enter Private DNS servers above';
   const wan=list(site.fields.wan_dns) || 'Enter WAN DNS servers above';
+  // A site without private DNS servers uses its WAN DNS; nothing is written.
+  document.querySelector('[data-field="private_dns"]').placeholder=list(site.fields.wan_dns) ? `Uses WAN DNS: ${list(site.fields.wan_dns)}` : 'Uses WAN DNS';
+  document.querySelector('[data-field="dhcp_server_ip"]').placeholder={server:'Not used in Server mode',relay:'Required for Relay mode'}[site.fields.dhcp_service_mode] || 'Only used for Relay mode';
   $('dns-preview-wan-system').textContent=wan;
   $('dns-preview-wan-other').textContent=wan;
 }
@@ -1028,6 +1031,18 @@ function removeRolloutSite(site) {
   if(index<current)current--;else if(index===current)current=Math.min(current,batch.length-1);
   rollout?.reset();markDirty();render();rollout?.refresh();
 }
+function removeSelectedSites() {
+  const sites=batch.filter(s=>!s.reference && String(s.fields.post)==='1');
+  if(!sites.length || deploymentActive() || projectWorking || busy)return;
+  const names=sites.map(s=>s.fields.site_name || 'Untitled branch');
+  const list=names.slice(0,12).join('\n')+(names.length>12 ? `\nand ${names.length-12} more` : '');
+  if(!confirm(`Remove ${sites.length} selected ${sites.length===1?'branch':'branches'} from this rollout?\n\n${list}\n\nThis removes the local drafts only. The sites in Zscaler are unchanged.`))return;
+  if(deploymentActive() || projectWorking || busy)return;
+  const active=batch[current],before=batch.slice(0,Math.max(current,0)).filter(s=>!sites.includes(s)).length;
+  batch.splice(0,batch.length,...batch.filter(s=>!sites.includes(s)));
+  if(current>=0)current=batch.includes(active)?batch.indexOf(active):Math.min(before,batch.length-1);
+  rollout?.reset();markDirty();render();rollout?.refresh();
+}
 $("remove-site").onclick = () => removeRolloutSite(currentSite());
 $("duplicate").onclick = () => {
   branchSource=copySite(currentSite());branchDrafts=[];$("branch-count").value="1";
@@ -1414,7 +1429,7 @@ projectSaver=new ZtbProjects.Saver({request:api,snapshot:projectSnapshot,onState
 rollout=ZtbRollout.install({batch:()=>batch,projectId:()=>projectSaver?.project?.id,api,
   active:()=>deploymentActive() || projectWorking,changed:()=>{markDirty();renderList();},
   grouped:()=>groupByCountry,setGrouped:value=>{groupByCountry=value;projectSaver?.touch();},
-  edit:index=>{current=index;render();showView('sites');},remove:removeRolloutSite,reference:()=>showView('reference'),review});
+  edit:index=>{current=index;render();showView('sites');},remove:removeRolloutSite,removeSelected:removeSelectedSites,reference:()=>showView('reference'),review});
 render();renderDeployment();
 initializeProjects().then(async()=>{
   await refreshConnectionStatus();await pollDeployment();

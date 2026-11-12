@@ -69,3 +69,37 @@ test('stale row callbacks cannot remove another branch and the last removal clea
   c.removeRolloutSite(c.batch[1]);assert.equal(c.current,0);
   c.removeRolloutSite(c.batch[0]);assert.equal(c.batch.length,0);assert.equal(c.current,-1);
 });
+
+test('remove selected takes out only selected branches after one confirmation',()=>{
+  const {context:c,prompts,saves}=workspace();
+  c.batch.push({fields:{site_name:'Branch C',post:'0'}},{fields:{site_name:'Branch D',post:'1'}});c.current=3;
+  const editing=c.batch[3];
+  c.removeSelectedSites();
+  assert.equal(prompts.length,1);assert.match(prompts[0],/Remove 3 selected branches/);
+  assert.match(prompts[0],/Branch A\nBranch B\nBranch D/);assert.match(prompts[0],/local drafts only/);
+  assert.deepEqual(c.batch.map(s=>s.fields.site_name),['Reference','Branch C']);assert.equal(c.batch[c.current],editing);
+  assert.equal(saves.length,1);assert.deepEqual(saves[0].map(s=>s.fields.site_name),['Reference','Branch C']);
+  assert.equal(c.previewSnapshot,null);assert.equal(c.deploymentJob.state,'expired');
+  assert.equal(c.resetCount,1);assert.equal(c.refreshCount,1);
+});
+
+test('remove selected moves the editor to the next remaining site and caps the confirmation list',()=>{
+  const {context:c,prompts}=workspace();
+  for(let i=0;i<20;i++)c.batch.push({fields:{site_name:`Copy ${i}`,post:'1'}});
+  c.batch.push({fields:{site_name:'Keep',post:'0'}});
+  c.removeSelectedSites();
+  assert.match(prompts[0],/Remove 22 selected branches/);assert.match(prompts[0],/and 10 more/);
+  assert.deepEqual(c.batch.map(s=>s.fields.site_name),['Reference','Keep']);assert.equal(c.current,1);
+});
+
+test('remove selected does nothing when canceled, nothing is selected, or work is active',()=>{
+  const canceled=workspace();canceled.context.confirmed=false;canceled.context.removeSelectedSites();
+  assert.equal(canceled.context.batch.length,3);assert.equal(canceled.saves.length,0);assert.equal(canceled.context.previewSnapshot,'approved');
+  const none=workspace();none.context.batch.forEach(s=>s.fields.post='0');none.context.removeSelectedSites();
+  assert.equal(none.prompts.length,0);assert.equal(none.context.batch.length,3);
+  for(const state of ['deploying','previewing','projectWorking','busy']){
+    const {context:c,prompts,saves}=workspace();
+    if(['deploying','previewing'].includes(state))c.deploymentJob.state=state;else c[state]=true;
+    c.removeSelectedSites();assert.equal(c.batch.length,3);assert.equal(prompts.length,0);assert.equal(saves.length,0);
+  }
+});

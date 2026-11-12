@@ -225,7 +225,7 @@ class DeploymentEngine:
 
     def get_template_settings(self, template_id):
         detail = self.template_cloner.detail(template_id)
-        return {key: detail.get(key) for key in ('deployment_type', 'dhcp_service', 'platform_type')}
+        return {key: detail.get(key) for key in ('deployment_type', 'dhcp_service', 'platform_type', 'private_dns')}
 
     def get_ha_template_interfaces(self, template_id):
         from template_cloning import read_rows
@@ -276,7 +276,7 @@ class DeploymentEngine:
                 stage = "location"
                 location = prepare_location_context(row, self.ZIA_LOCATIONS.resolve, self.ZIA_LOCATION_TEMPLATES.resolve)
                 stage = "site payload"
-                payload = build_site_payload(row, location)
+                payload = build_site_payload(row, location, settings)
                 stage = "ZPA segments"
                 segment_plan = zpa_segments.build_segment_plan(row["site_name"], site.vlans)
                 stage = "UCaaS local breakout"
